@@ -23,7 +23,7 @@ There is one such store per directory you launch from. If you keep your memories
 ## Install
 
 ```sh
-git clone https://github.com/USER/cly
+git clone https://github.com/BlueRaddish/cly
 cd cly
 ./install.sh                 # bash: appends a source line to ~/.bashrc
 ```
