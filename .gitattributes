@@ -1,0 +1,11 @@
+# Shell scripts must arrive with LF endings whatever the cloner's core.autocrlf
+# is set to. A CRLF checkout gives bash a shebang of "#!/usr/bin/env bash\r",
+# which fails with a "bad interpreter" error that names a binary that exists —
+# so default everything to LF and opt the Windows-native files back out.
+* text=auto eol=lf
+
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+*.exe  binary
+*.png  binary
