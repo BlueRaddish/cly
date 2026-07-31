@@ -1,0 +1,4 @@
+# local state, never the repo's business
+*.log
+.DS_Store
+Thumbs.db
