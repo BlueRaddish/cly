@@ -42,6 +42,15 @@ if (-not (Test-Path -LiteralPath $src)) {
     throw "install: cannot find $src"
 }
 
+# Set-Content -Encoding utf8 emits a BOM on Windows PowerShell 5.1, and a BOM
+# is not what a profile that had none should suddenly grow. Write UTF-8 without
+# one, with the platform newline, so the file comes back the way it went in.
+function Write-ClyProfile {
+    param([string] $Path, [string[]] $Lines)
+    $text = ($Lines -join [Environment]::NewLine) + [Environment]::NewLine
+    [System.IO.File]::WriteAllText($Path, $text, (New-Object System.Text.UTF8Encoding $false))
+}
+
 # The profile file may not exist yet, and neither may its directory.
 $profileDir = Split-Path -Parent $ProfilePath
 if ($profileDir -and -not (Test-Path -LiteralPath $profileDir)) {
@@ -53,7 +62,12 @@ if ($profileDir -and -not (Test-Path -LiteralPath $profileDir)) {
 $kept = @()
 if (Test-Path -LiteralPath $ProfilePath) {
     $skip = $false
-    foreach ($line in (Get-Content -LiteralPath $ProfilePath)) {
+    # -Encoding UTF8 is not optional: Windows PowerShell 5.1's Get-Content
+    # defaults to the system ANSI codepage, so a profile containing any
+    # non-ASCII character (an em-dash in a comment is enough) would be read as
+    # mojibake and written back that way — corrupting lines this script has no
+    # business touching. Reading UTF-8 is safe for a pure-ASCII file too.
+    foreach ($line in (Get-Content -LiteralPath $ProfilePath -Encoding UTF8)) {
         if     ($line -eq $marker)  { $skip = $true;  continue }
         elseif ($line -eq $endMark) { $skip = $false; continue }
         if (-not $skip) { $kept += $line }
@@ -61,14 +75,14 @@ if (Test-Path -LiteralPath $ProfilePath) {
 }
 
 if ($Uninstall) {
-    Set-Content -LiteralPath $ProfilePath -Value $kept -Encoding utf8
+    Write-ClyProfile -Path $ProfilePath -Lines $kept
     Write-Output "cly: removed from $ProfilePath"
     return
 }
 
 $block = @($marker, ". '$src'", $endMark)
 
-Set-Content -LiteralPath $ProfilePath -Value ($kept + $block) -Encoding utf8
+Write-ClyProfile -Path $ProfilePath -Lines ($kept + $block)
 Write-Output "cly: installed into $ProfilePath"
 
 # -Dir seeds the config file rather than setting CLY_DIR, because CLY_DIR
