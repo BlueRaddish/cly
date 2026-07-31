@@ -36,7 +36,30 @@ Both installers point at the files where they already sit, so `git pull` here up
 
 PowerShell 5.1 and PowerShell 7 keep **separate** profiles. If you use both, run `install.ps1` under each.
 
-To pin a directory other than the default at install time:
+## Choosing the directory
+
+The first time you run `cly` it asks where Claude Code should launch from, and remembers the answer in `~/.config/cly/config`. You are only asked once.
+
+```console
+$ cly
+cly: which directory should Claude Code launch from?
+     It keeps a separate memory store per launch directory, so
+     pinning one means the same memories load every time.
+     Enter a path, 'none' to launch wherever you are, or press
+     Enter for the default.
+     [/home/me/claude] >
+```
+
+Answer `none` to turn pinning off — `cly` then behaves like plain `claude` with your default flags, and stops asking.
+
+To set it without being asked, or to change it later:
+
+```sh
+cly --cly-init ~/claude      # set and remember; creates the directory if needed
+cly --cly-init               # ask again, interactively
+```
+
+The installers also take a directory, if you would rather decide at install time:
 
 ```sh
 ./install.sh --dir ~/claude
@@ -45,13 +68,32 @@ To pin a directory other than the default at install time:
 .\install.ps1 -Dir C:\Users\me\claude
 ```
 
+## Flags
+
+`cly` claims a few flags of its own. Everything else is passed straight through to Claude Code, so `cly --resume` and `cly -p "..."` work as they always did.
+
+| Flag | Meaning |
+|---|---|
+| `--cly-init [DIR]` | set the launch directory and remember it; prompts when `DIR` is omitted |
+| `--cly-dir DIR` | launch from `DIR` just this once |
+| `--cly-no-dir` | launch from the current directory just this once |
+| `--cly-config` | show the config file, what it says, and what would happen |
+| `--cly-help` | list these |
+
+They are prefixed `--cly-` so that they cannot collide with a Claude Code flag now or later.
+
 ## Configuration
+
+Precedence, most specific first: `--cly-dir` / `--cly-no-dir`, then `CLY_DIR`, then the config file, then the first-use prompt.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CLY_DIR` | `$HOME/claude` | Directory to launch from |
+| `CLY_DIR` | — | Launch directory, overriding the config file |
+| `CLY_CONFIG` | `~/.config/cly/config` | Where the config lives |
 | `CLY_BIN` | `claude` | The executable, if it is not on `PATH` under that name |
 | `CLY_FLAGS` | `--remote-control --dangerously-skip-permissions` | Flags passed on every call |
+
+Both shells read and write the **same** config file, and each accepts the other's path style — bash stores `/c/Users/me/claude`, PowerShell stores `C:\Users\me\claude`, and either one is understood on the way back in.
 
 Arguments you pass go through untouched: `cly --resume`, `cly -p "..."`, all fine.
 
@@ -66,12 +108,13 @@ $CLY_FLAGS = @()             # PowerShell — the variable, not $env:
 
 PowerShell deletes an environment variable when you assign it `""`, so `$env:CLY_FLAGS` cannot express "empty" as distinct from "unset". The plain `$CLY_FLAGS` variable can, and takes precedence over the environment one when it exists.
 
-## Behaviour when the directory is missing
+## Behaviour in the awkward cases
 
-- **`CLY_DIR` set but missing** — warns, then starts in the current directory. You asked for something specific and did not get it, so it says so.
-- **`CLY_DIR` unset and `~/claude` missing** — starts in the current directory, silently. You never asked for directory pinning, so there is nothing to complain about; `cly` is then just `claude` plus your default flags.
+- **The configured directory has been deleted** — warns, names it, and starts in the current directory. The symptom of staying quiet here would be memories mysteriously not loading.
+- **No config yet and nothing to prompt with** (a script, a hook, a cron job) — starts in the current directory and writes no config, rather than blocking forever on a question nobody can answer.
+- **`--cly-init` with no directory and no terminal** — refuses, rather than guessing.
 
-Either way your shell's own working directory is untouched when Claude Code exits — bash runs the body in a subshell, PowerShell uses `Push-Location`/`Pop-Location` in a `finally`.
+Your shell's own working directory is untouched when Claude Code exits — bash runs the launch in a subshell, PowerShell uses `Push-Location`/`Pop-Location` in a `finally`.
 
 ## A warning about the default flags
 

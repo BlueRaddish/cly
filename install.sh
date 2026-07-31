@@ -50,11 +50,31 @@ fi
 
 {
   printf '%s\n' "$MARKER"
-  [ -n "$CLY_DIR_VALUE" ] && printf 'export CLY_DIR=%s\n' "$CLY_DIR_VALUE"
   printf '. "%s"\n' "$SRC"
   printf '%s\n' "$END_MARKER"
 } >> "$RC"
 
 echo "cly: installed into $RC"
-[ -n "$CLY_DIR_VALUE" ] && echo "cly: launch directory set to $CLY_DIR_VALUE"
+
+# --dir seeds the config file rather than exporting CLY_DIR, because CLY_DIR
+# overrides the config permanently — `cly --cly-init` would then appear to do
+# nothing. Seeding the config leaves it editable the normal way.
+if [ -n "$CLY_DIR_VALUE" ]; then
+  CFG=${CLY_CONFIG:-$HOME/.config/cly/config}
+  mkdir -p "$(dirname "$CFG")"
+  if [ "$CLY_DIR_VALUE" != none ]; then
+    mkdir -p "$CLY_DIR_VALUE"
+    CLY_DIR_VALUE=$(cd "$CLY_DIR_VALUE" && pwd)
+  fi
+  {
+    printf '# cly configuration\n'
+    printf '# Written by install.sh --dir; safe to edit by hand.\n'
+    printf '# dir=none means launch wherever you happen to be.\n'
+    printf 'dir=%s\n' "$CLY_DIR_VALUE"
+  } > "$CFG"
+  echo "cly: launch directory set to $CLY_DIR_VALUE (in $CFG)"
+else
+  echo "cly: you will be asked for a launch directory the first time you run it."
+fi
+
 echo "cly: open a new shell, or run: . $RC"

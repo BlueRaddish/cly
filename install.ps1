@@ -66,13 +66,19 @@ if ($Uninstall) {
     return
 }
 
-$block = @($marker)
-if ($Dir) { $block += "`$env:CLY_DIR = '$Dir'" }
-$block += ". '$src'"
-$block += $endMark
+$block = @($marker, ". '$src'", $endMark)
 
 Set-Content -LiteralPath $ProfilePath -Value ($kept + $block) -Encoding utf8
-
 Write-Output "cly: installed into $ProfilePath"
-if ($Dir) { Write-Output "cly: launch directory set to $Dir" }
+
+# -Dir seeds the config file rather than setting CLY_DIR, because CLY_DIR
+# overrides the config permanently — `cly --cly-init` would then appear to do
+# nothing. Seeding the config leaves it editable the normal way.
+if ($Dir) {
+    . $src   # for Get-ClyConfigPath / Set-ClyConfiguredDir / Initialize-Cly
+    Initialize-Cly -Dir $Dir
+} else {
+    Write-Output "cly: you will be asked for a launch directory the first time you run it."
+}
+
 Write-Output "cly: open a new shell, or run: . `$PROFILE"
