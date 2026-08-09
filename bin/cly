@@ -1,0 +1,322 @@
+#!/usr/bin/env bash
+# cly — launch Claude Code from one fixed directory, with the flags you always
+# want, passing everything else straight through.
+#
+# Claude Code keys its memory store off the directory it was launched from:
+#
+#     ~/.claude/projects/<launch-dir-with-separators-mangled>/memory/
+#
+# There is one store per directory, so launching from anywhere else loads none
+# of those memories. Nothing errors; the first symptom is Claude not knowing
+# something you are certain you told it. cly pins the directory so that cannot
+# happen by accident.
+#
+# This is the whole program. bash, MSYS2 and WSL run it directly; PowerShell
+# and cmd reach it through the cly.cmd shim beside it. Install with install.sh.
+#
+# It deliberately uses shell builtins and mkdir and nothing else: the shim may
+# hand it a bash whose PATH carries no sed, awk or cygpath, and a four-line
+# config file is not worth a dependency on any of them.
+
+set -u
+
+CLY_VERSION=2.0.0
+
+# The flags a bare Enter accepts at the prompt. --dangerously-skip-permissions
+# turns off every confirmation Claude Code would otherwise ask for; it is the
+# default here because the prompt shows it before anyone accepts it.
+CLY_DEFAULT_FLAGS='--remote-control --dangerously-skip-permissions'
+
+cly_config_path() { printf '%s\n' "${CLY_CONFIG:-$HOME/.config/cly/config}"; }
+
+# --- config ------------------------------------------------------------------
+
+cfg_dir=''
+cfg_flags=''
+cfg_has_flags=0
+cfg_exists=0
+
+cly_config_load() {
+    local f line
+    f=$(cly_config_path)
+    [ -r "$f" ] || return 0
+    cfg_exists=1
+    while IFS= read -r line || [ -n "$line" ]; do
+        # A config hand-edited in a Windows editor comes back with CRLF, and a
+        # trailing \r in a directory name is invisible and fatal.
+        line=${line%$'\r'}
+        case $line in
+            dir=*)   cfg_dir=${line#dir=} ;;
+            flags=*) cfg_flags=${line#flags=}; cfg_has_flags=1 ;;
+        esac
+    done < "$f"
+}
+
+cly_config_save() {
+    local f dir flags parent
+    dir=$1
+    flags=$2
+    f=$(cly_config_path)
+    case $f in
+        */*) parent=${f%/*}; mkdir -p "$parent" || return 1 ;;
+    esac
+    {
+        printf '%s\n' '# cly configuration'
+        printf '%s\n' '# Rewritten by `cly --cly-init`; safe to edit by hand.'
+        printf '%s\n' '# An empty dir= means launch wherever you happen to be.'
+        printf '%s\n' '# An empty flags= means pass no flags of our own.'
+        printf 'dir=%s\n' "$dir"
+        printf 'flags=%s\n' "$flags"
+    } > "$f"
+}
+
+# --- paths -------------------------------------------------------------------
+
+# Accept a Windows path wherever a path is read. Someone standing in PowerShell
+# types C:\Users\me\claude at the prompt, and that has to mean the same
+# directory as /c/Users/me/claude does to the bash this script is running in.
+# The drive letter is left in whatever case it arrived: /C/Users and /c/Users
+# name the same directory on the only filesystems that have drive letters.
+cly_to_posix() {
+    local p drive rest
+    p=$1
+    case $p in
+        [A-Za-z]:[/\\]*)
+            if command -v cygpath >/dev/null 2>&1; then
+                cygpath -u "$p"
+            else
+                drive=${p%%:*}
+                rest=${p#*:}
+                printf '/%s%s\n' "$drive" "${rest//\\//}"
+            fi ;;
+        *) printf '%s\n' "$p" ;;
+    esac
+}
+
+# ~ is expanded by the shell that parses it, never by one that receives it in a
+# variable, so a typed "~/claude" would otherwise be a literal directory named ~.
+cly_expand_tilde() {
+    case $1 in
+        '~')   printf '%s\n' "$HOME" ;;
+        '~/'*) printf '%s\n' "$HOME/${1#'~/'}" ;;
+        *)     printf '%s\n' "$1" ;;
+    esac
+}
+
+# --- help --------------------------------------------------------------------
+
+cly_help() {
+    cat <<'EOF'
+cly — launch Claude Code from one fixed directory
+
+usage: cly [--cly-init [DIR]] [--cly-dir DIR] [--cly-no-dir] [--cly-config]
+           [--cly-help] [CLAUDE-ARG...]
+
+Runs Claude Code from a directory you choose once, with flags you choose once.
+Both are asked for on the first run. Anything cly does not recognise is passed
+to Claude Code untouched.
+
+EXAMPLES
+  $ cly                        launch, from the configured directory
+  $ cly --resume               the same, and --resume reaches Claude Code
+  $ cly --cly-init ~/claude    pin a launch directory, keep the flags
+  $ cly --cly-no-dir           launch here instead, just this once
+
+OPTIONS
+  --cly-init [DIR]  set launch directory and standing flags; asks when omitted
+  --cly-dir DIR     launch from DIR, this call only
+  --cly-no-dir      launch from the current directory, this call only
+  --cly-config      show what is configured and what would run
+  --cly-help        show this help
+
+ENVIRONMENT
+  CLY_DIR     launch directory, overriding the config file
+  CLY_FLAGS   standing flags, overriding the config file; empty means none
+  CLY_BIN     the Claude Code executable (default: claude)
+  CLY_CONFIG  config file location (default: ~/.config/cly/config)
+
+FILES
+  ~/.config/cly/config   the launch directory and the standing flags
+
+Every flag of cly's own begins --cly-, so none can ever collide with a Claude
+Code flag. `cly --help` is therefore Claude Code's help, not this.
+EOF
+}
+
+# Whether there is a human on the other end to answer a prompt. Its own
+# function so the prompt can be tested without a terminal.
+cly_is_interactive() { [ -t 0 ]; }
+
+# --- init --------------------------------------------------------------------
+
+# Ask both questions, or take the directory as given and leave the flags alone.
+# $1 is a directory, or empty to ask.
+cly_init() {
+    local dir=$1 reply flags
+
+    flags=$CLY_DEFAULT_FLAGS
+    [ "$cfg_has_flags" = 1 ] && flags=$cfg_flags
+
+    if [ -n "$dir" ]; then
+        cly_init_apply "$dir" "$flags"
+        return $?
+    fi
+
+    # No terminal check here: an explicit --cly-init is allowed to read its
+    # answers from a pipe, which is how the prompt is tested. What it must not
+    # do is carry on with nothing, so a read that hits EOF is an error.
+    echo "cly: two questions, then it will not ask again."
+    echo
+    echo "  Claude Code keeps a separate memory store for every directory it is"
+    echo "  launched from, so pinning one means the same memories load each time."
+    echo
+    echo "  Which directory should Claude Code launch from?"
+    echo "  Enter a path, or press Enter to launch wherever you happen to be."
+    printf '  [%s] > ' "${cfg_dir:-none}"
+    IFS= read -r reply || { cly_init_no_answer; return 2; }
+    # Enter keeps whatever is configured, which on a first run is nothing —
+    # and nothing is a real answer meaning "launch where I am standing".
+    dir=${reply:-$cfg_dir}
+    case $dir in none|NONE) dir='' ;; esac
+
+    echo
+    echo "  Which flags should be passed to Claude Code on every launch?"
+    echo "  Enter flags, 'none' for no flags, or press Enter for the default."
+    printf '  [%s] > ' "$flags"
+    IFS= read -r reply || { cly_init_no_answer; return 2; }
+    [ -n "$reply" ] && flags=$reply
+    case $flags in none|NONE) flags='' ;; esac
+    echo
+
+    cly_init_apply "$dir" "$flags"
+}
+
+cly_init_no_answer() {
+    echo >&2
+    echo "cly: --cly-init needs a directory when there is nothing to read" >&2
+    echo "usage: cly --cly-init [DIR]" >&2
+}
+
+cly_init_apply() {
+    local dir=$1 flags=$2 resolved
+
+    if [ -n "$dir" ]; then
+        dir=$(cly_expand_tilde "$dir")
+        dir=$(cly_to_posix "$dir")
+        if [ ! -d "$dir" ]; then
+            if mkdir -p "$dir" 2>/dev/null; then
+                echo "cly: created $dir"
+            else
+                echo "cly: cannot create $dir" >&2
+                return 1
+            fi
+        fi
+        # Store it absolute: a relative path would name a different directory
+        # from every directory you later call cly in.
+        resolved=$(cd "$dir" && pwd) || return 1
+        dir=$resolved
+    fi
+
+    cly_config_save "$dir" "$flags" || return 1
+    echo "cly: launch directory  ${dir:-(wherever you are)}"
+    echo "cly: standing flags    ${flags:-(none)}"
+    echo "cly: stored in         $(cly_config_path)"
+}
+
+# --- main --------------------------------------------------------------------
+
+cly_main() {
+    local bin flags dir='' init_dir='' want_init=0 want_config=0 want_help=0
+    local no_dir=0 rest_is_passthru=0 flags_set=0
+    local -a passthru=()
+
+    while [ $# -gt 0 ]; do
+        if [ "$rest_is_passthru" = 1 ]; then passthru+=("$1"); shift; continue; fi
+        case $1 in
+            --) rest_is_passthru=1; passthru+=("$1"); shift ;;
+            --cly-init)
+                want_init=1; shift
+                # An optional argument: take the next word only when it is not
+                # itself a flag, so a bare --cly-init still asks.
+                case ${1:-} in ''|-*) ;; *) init_dir=$1; shift ;; esac ;;
+            --cly-dir)
+                if [ $# -lt 2 ]; then
+                    echo "cly: --cly-dir needs a directory" >&2
+                    echo "usage: cly [--cly-dir DIR] [CLAUDE-ARG...]" >&2
+                    return 2
+                fi
+                dir=$2; shift 2 ;;
+            --cly-no-dir) no_dir=1; shift ;;
+            --cly-config) want_config=1; shift ;;
+            --cly-help)   want_help=1; shift ;;
+            *) passthru+=("$1"); shift ;;
+        esac
+    done
+
+    [ "$want_help" = 1 ] && { cly_help; return 0; }
+
+    cly_config_load
+    [ "$want_init" = 1 ] && { cly_init "$init_dir"; return $?; }
+
+    bin=${CLY_BIN:-claude}
+
+    # ${VAR+set}, not :-, so that CLY_FLAGS='' means "no flags at all" rather
+    # than "fall back to the default".
+    if [ "${CLY_FLAGS+set}" = set ]; then
+        flags=$CLY_FLAGS; flags_set=1
+    elif [ "$cfg_has_flags" = 1 ]; then
+        flags=$cfg_flags; flags_set=1
+    else
+        flags=$CLY_DEFAULT_FLAGS
+    fi
+
+    # Precedence, most specific first. An unset directory means the current
+    # one — the default for anybody who pressed Enter at the prompt.
+    if [ "$no_dir" = 1 ]; then
+        dir=''
+    elif [ -n "$dir" ]; then
+        dir=$(cly_to_posix "$(cly_expand_tilde "$dir")")
+    elif [ -n "${CLY_DIR:-}" ]; then
+        dir=$(cly_to_posix "$(cly_expand_tilde "$CLY_DIR")")
+    elif [ "$cfg_exists" = 1 ]; then
+        [ -n "$cfg_dir" ] && dir=$(cly_to_posix "$cfg_dir")
+    elif [ "$want_config" = 0 ] && cly_is_interactive; then
+        # First run. Ask, remember, then carry on into the launch below.
+        cly_init '' || return $?
+        cfg_dir=''; cfg_flags=''; cfg_has_flags=0; cfg_exists=0
+        cly_config_load
+        [ -n "$cfg_dir" ] && dir=$(cly_to_posix "$cfg_dir")
+        [ "$flags_set" = 0 ] && [ "$cfg_has_flags" = 1 ] && flags=$cfg_flags
+        echo
+    fi
+    # Anything left over — no config and no terminal to ask with, as in a
+    # script, a hook or a cron job — launches here and writes no config,
+    # rather than blocking on a question nobody can answer.
+
+    if [ "$want_config" = 1 ]; then
+        echo "cly $CLY_VERSION"
+        echo "config file:  $(cly_config_path)"
+        [ "$cfg_exists" = 1 ] || echo "              (none yet — you are asked on the first launch)"
+        echo "launch dir:   ${dir:-(wherever you are)}"
+        [ -n "${CLY_DIR:-}" ] && echo "              from CLY_DIR, overriding the config"
+        echo "executable:   $bin"
+        echo "flags:        ${flags:-(none)}"
+        return 0
+    fi
+
+    if [ -n "$dir" ] && [ ! -d "$dir" ]; then
+        # Configured but gone. Worth saying: staying quiet here looks exactly
+        # like memories mysteriously failing to load.
+        echo "cly: $dir does not exist — launching in $PWD instead" >&2
+        echo "cly: run 'cly --cly-init' to point it somewhere else" >&2
+        dir=''
+    fi
+
+    [ -n "$dir" ] && { cd "$dir" || return 1; }
+
+    # $flags is deliberately unquoted: it is a list of arguments, not one.
+    # shellcheck disable=SC2086
+    exec "$bin" $flags ${passthru[@]+"${passthru[@]}"}
+}
+
+cly_main "$@"
