@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# test.sh — cly's test suite. No Claude Code is launched: CLY_BIN points at a
-# stub that prints its working directory and its arguments, which is the entire
+# test.sh — cly's test suite. No agent is launched: CLY_BIN points at a stub
+# that prints its working directory and its arguments, which is the entire
 # observable behaviour of cly. CLY_CONFIG points into a scratch directory, so
 # the real ~/.config/cly/config is unreachable from here.
 #
@@ -15,7 +15,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 export CLY_CONFIG="$work/config"
-stub="$work/claude-stub"
+stub="$work/agent-stub"
 cat > "$stub" <<'EOF'
 #!/usr/bin/env bash
 printf 'PWD=%s\n' "$(pwd)"
@@ -32,8 +32,6 @@ ok()   { pass=$((pass + 1)); }
 bad()  { fail=$((fail + 1)); printf 'FAIL %s\n' "$1"; [ $# -gt 1 ] && printf '     %s\n' "$2"; }
 note() { skip=$((skip + 1)); printf 'SKIP %s\n' "$1"; }
 
-# Assert that running cly with these arguments produces output containing
-# (or, with want_absent, not containing) a line.
 has() {  # has LABEL NEEDLE HAYSTACK
     case $3 in
         *"$2"*) ok ;;
@@ -52,263 +50,346 @@ eq() {  # eq LABEL EXPECTED ACTUAL
 
 reset_config() { rm -f "$CLY_CONFIG"; }
 write_config() { printf '%s\n' "$@" > "$CLY_CONFIG"; }
+config()      { cat "$CLY_CONFIG"; }
 
-# Everything runs with stdin closed, so the first-run prompt can never fire and
-# hang the suite. The prompt itself is exercised by feeding a here-doc instead.
+# Everything runs with stdin closed, so no prompt can fire and hang the suite.
+# The prompts are exercised deliberately, by ask() below.
 run() { "$cly" "$@" </dev/null 2>"$work/err"; }
 err() { cat "$work/err"; }
 
-# --- help ---------------------------------------------------------------------
+# A run with answers fed in and a terminal claimed. CLY_ASSUME_TTY is the only
+# way to reach the prompts without a pty; the script documents it as such.
+ask() {  # ask ANSWERS ARG...
+    local answers=$1; shift
+    printf '%s' "$answers" | CLY_ASSUME_TTY=1 "$cly" "$@" 2>"$work/err"
+}
 
-out=$(run --cly-help); rc=$?
+here=$(pwd)
+pinned="$work/pinned"; mkdir -p "$pinned"
+other="$work/other";   mkdir -p "$other"
+
+# --- tier 0: a bare cly -------------------------------------------------------
+
+reset_config
+out=$(run); rc=$?
+eq   'bare cly exits 0' 0 "$rc"
+has  'bare cly names the tool' 'cly — launch an agent CLI' "$out"
+has  'bare cly shows the usage line' 'usage: cly [OPTION...] <PROFILE|.>' "$out"
+has  'bare cly points at the default' 'cly .' "$out"
+has  'bare cly points at the full help' "Run 'cly help' for more." "$out"
+has  'bare cly says when nothing is configured' 'No profiles yet' "$out"
+hasnt 'bare cly launches nothing' 'PWD=' "$out"
+eq   'bare cly writes no config' '' "$(ls "$CLY_CONFIG" 2>/dev/null)"
+
+write_config 'default=b' 'profile.a.bin=x' 'profile.b.bin=y'
+out=$(run)
+has  'bare cly lists the profiles' 'profiles: a, b (default)' "$out"
+
+# --- help and version ---------------------------------------------------------
+
+out=$(run help); rc=$?
 eq   'help exits 0' 0 "$rc"
-has  'help names the tool' 'cly — launch Claude Code' "$out"
-has  'help has a usage line' 'usage: cly' "$out"
+has  'help has a usage line' 'usage: cly [OPTION...]' "$out"
 has  'help has examples' 'EXAMPLES' "$out"
+has  'help has commands' 'COMMANDS' "$out"
+has  'help documents the exit codes' 'EXIT STATUS' "$out"
+has  'help links to the manual' 'https://github.com/BlueRaddish/cly' "$out"
 eq   'help writes nothing to stderr' '' "$(err)"
+eq   '--help is the same screen' "$out" "$(run --help)"
+eq   '-h is the same screen' "$out" "$(run -h)"
 
 long=$(printf '%s\n' "$out" | awk 'length > 95 { c++ } END { print c + 0 }')
 eq   'help wraps under 95 columns' 0 "$long"
 
-# Documented flags and parsed flags must be the same set — help that has
+ver=$(run version)
+has  'version prints a version' 'cly 3.' "$ver"
+eq   '--version agrees' "$ver" "$(run --version)"
+eq   '-V agrees' "$ver" "$(run -V)"
+
+# Documented options and parsed options must be the same set — help that has
 # drifted from behaviour is the bug this catches.
 documented=$(printf '%s\n' "$out" \
-    | awk '/^OPTIONS$/ { on = 1; next } /^[A-Z]+$/ { on = 0 } on' \
-    | grep -o -- '--cly-[a-z-]*' | sort -u)
-parsed=$(grep -o -- '^            --cly-[a-z-]*' "$cly" | tr -d ' ' | sort -u)
-eq   'documented flags == parsed flags' "$parsed" "$documented"
+    | awk '/^OPTIONS$/ { on = 1; next } /^[A-Z]+ ?[A-Z]*$/ { on = 0 } on' \
+    | grep -o -- '--[a-z][a-z-]*' | sort -u)
+parsed=$(grep -o -- '^            -[^)]*)' "$cly" | grep -o -- '--[a-z][a-z-]*' | sort -u)
+eq   'documented options == parsed options' "$parsed" "$documented"
 
-# --- no config ----------------------------------------------------------------
+# The same for the commands: what COMMANDS lists is what may not be a profile
+# name, and both come from the one list in the script.
+documented_cmds=$(printf '%s\n' "$out" \
+    | awk '/^COMMANDS$/ { on = 1; next } /^[A-Z]+ ?[A-Z]*$/ { on = 0 } on' \
+    | grep -o '^  [a-z][a-z]*' | tr -d ' ' | sort -u)
+reserved=$(grep -o "^CLY_RESERVED='[^']*'" "$cly" | sed "s/.*='//; s/'$//" \
+    | tr ' ' '\n' | grep -v '^\.$' | sort -u)
+eq   'documented commands == reserved names' "$reserved" "$documented_cmds"
+
+# --- the grammar --------------------------------------------------------------
+
+write_config 'default=one' \
+    "profile.one.bin=$stub" 'profile.one.flags=--standing' "profile.one.dir=$pinned"
+
+out=$(run .)
+has  'cly . launches the default' "PWD=$pinned" "$out"
+has  'cly . carries the profile flags' 'ARG=--standing' "$out"
+
+out=$(run one)
+has  'a profile name launches it' "PWD=$pinned" "$out"
+
+out=$(run . --resume -p 'two words')
+has  'agent flags pass through' 'ARG=--resume' "$out"
+has  'quoted agent arguments survive' 'ARG=two words' "$out"
+args=$(printf '%s\n' "$out" | grep '^ARG=' | tr '\n' ' ')
+eq   'standing flags come first, in order' 'ARG=--standing ARG=--resume ARG=-p ARG=two words ' "$args"
+
+# The whole point of the grammar: after the name, nothing is cly's.
+out=$(run one --dir /nowhere)
+has  'after the name --dir belongs to the agent' 'ARG=--dir' "$out"
+has  'after the name --dir does not move cly' "PWD=$pinned" "$out"
+out=$(run one --help)
+has  'after the name --help belongs to the agent' 'ARG=--help' "$out"
+out=$(run one .)
+has  'after the name a dot belongs to the agent' 'ARG=.' "$out"
+
+out=$(run --resume); rc=$?
+eq   'an option before the name that cly does not know exits 2' 2 "$rc"
+has  'it says whose options go where' "options come before the profile name" "$(err)"
+has  'it suggests the fix' 'cly . --resume' "$(err)"
+
+# --- options and the environment ----------------------------------------------
+
+out=$(run --dir "$other" one)
+has  '--dir wins over the profile' "PWD=$other" "$out"
+out=$(run -d "$other" one)
+has  '-d is the same option' "PWD=$other" "$out"
+out=$(run --here one)
+has  '--here launches here' "PWD=$here" "$out"
+out=$(run --here --dir "$other" one)
+has  '--here wins over --dir' "PWD=$here" "$out"
+out=$(CLY_DIR="$other" run one)
+has  'CLY_DIR wins over the profile' "PWD=$other" "$out"
+out=$(CLY_DIR="$other" run --here one)
+has  '--here wins over CLY_DIR' "PWD=$here" "$out"
+out=$(CLY_FLAGS='--env' run one)
+has  'CLY_FLAGS wins over the profile' 'ARG=--env' "$out"
+hasnt 'CLY_FLAGS replaces the profile flags' 'ARG=--standing' "$out"
+out=$(CLY_FLAGS='' run one)
+hasnt 'an empty CLY_FLAGS means no flags at all' 'ARG=' "$out"
+
+out=$(run --dir); rc=$?
+eq   '--dir without a directory exits 2' 2 "$rc"
+has  '--dir without a directory says usage' 'usage: cly' "$(err)"
+
+# A profile with no flags of its own is given none: standing flags belong to
+# the profile that asked for them, and another tool would choke on them.
+write_config 'default=one' "profile.one.bin=$stub" 'profile.one.flags=--standing' \
+    "profile.two.bin=$stub" 'profile.two.dir=none'
+out=$(run two)
+hasnt 'a profile without flags gets none' 'ARG=' "$out"
+has  'a profile with dir=none launches here' "PWD=$here" "$out"
+hasnt 'one profile does not borrow another2s flags' 'ARG=--standing' "$out"
+
+# A profile with no bin of its own is named after the tool it runs.
+write_config 'default=t' 'profile.t.flags=--x'
+out=$( unset CLY_BIN; "$cly" config t </dev/null )
+has  'a profile without bin is named after it' 'executable  t' "$out"
+
+# --- the default profile ------------------------------------------------------
+
+write_config "profile.only.bin=$stub" 'profile.only.dir=none'
+out=$(run .)
+has  'a lone profile is the default without being told' "PWD=$here" "$out"
+
+write_config 'profile.a.bin=x' 'profile.b.bin=y'
+out=$(run .); rc=$?
+eq   'several profiles and no default exits 2' 2 "$rc"
+has  'it says which profiles there are' 'profiles: a b' "$(err)"
+has  'it says how to choose' "run 'cly init'" "$(err)"
 
 reset_config
-here=$(pwd)
-out=$(run)
-has  'no config launches here' "PWD=$here" "$out"
-has  'no config uses default flags' 'ARG=--remote-control' "$out"
-has  'no config uses default flags (2)' 'ARG=--dangerously-skip-permissions' "$out"
-[ -f "$CLY_CONFIG" ] && bad 'no config writes no config' 'config was created' || ok
+out=$(run .); rc=$?
+eq   'no config and no terminal exits 2' 2 "$rc"
+has  'no config and no terminal says why' 'no terminal to ask at' "$(err)"
+eq   'no config and no terminal writes nothing' '' "$(ls "$CLY_CONFIG" 2>/dev/null)"
+
+write_config 'default=one' "profile.one.bin=$stub" "profile.one.dir=$pinned"
+out=$(run nope); rc=$?
+eq   'an unconfigured name with no terminal exits 2' 2 "$rc"
+has  'it names the profiles that do exist' 'profiles: one' "$(err)"
+has  'it says how to make one' "run 'cly init nope'" "$(err)"
 
 # --- init ---------------------------------------------------------------------
 
 reset_config
-target="$work/pinned"
-out=$(run --cly-init "$target"); rc=$?
-eq   'init exits 0' 0 "$rc"
-[ -d "$target" ] && ok || bad 'init creates the directory'
-has  'init reports the directory' "launch directory  $target" "$out"
-has  'init reports the flags' 'standing flags    --remote-control' "$out"
-has  'config records the directory' "dir=$target" "$(cat "$CLY_CONFIG")"
-has  'config records the flags' 'flags=--remote-control --dangerously-skip-permissions' "$(cat "$CLY_CONFIG")"
+out=$(ask '--search
+'"$pinned"'
+' init codex); rc=$?
+eq   'init NAME exits 0' 0 "$rc"
+has  'init NAME reports the profile' 'cly: profile codex  codex --search' "$out"
+has  'init NAME reports the directory' "launches in    $pinned" "$out"
+has  'init writes the executable' 'profile.codex.bin=codex' "$(config)"
+has  'init writes the flags' 'profile.codex.flags=--search' "$(config)"
+has  'init writes the directory' "profile.codex.dir=$pinned" "$(config)"
+has  'the first profile becomes the default' 'default=codex' "$(config)"
+has  'init says so' "'cly .' now launches codex" "$out"
+has  'a fresh config explains itself' '# cly configuration' "$(config)"
 
-out=$(run)
-has  'configured directory is used' "PWD=$target" "$out"
+out=$(ask 'none
 
-out=$(run --cly-init); rc=$?
-eq   'init without a directory or a tty exits 2' 2 "$rc"
-has  'init without a tty says why' 'needs a directory' "$(err)"
+' init claude)
+has  'a second profile does not take the default' 'default=codex' "$(config)"
+hasnt 'and does not claim to have' "now launches claude" "$out"
+has  'none means no flags' 'profile.claude.flags=' "$(config)"
+has  'an empty answer means launch here' 'profile.claude.dir=none' "$(config)"
 
-# The prompt, driven by a here-doc: directory, then flags.
+out=$(run .)
+has  'the default is still the first one' 'ARG=--search' "$out"
+
+# The claude profile is offered Claude Code's flags; nothing else is.
+out=$(ask '
+none
+' init claude)
+has  'claude is offered the standing flags' '--remote-control --dangerously-skip-permissions' "$out"
+out=$(ask '
+none
+' init codex)
+hasnt 'codex is not' '--remote-control' "$out"
+
+out=$(run init config); rc=$?
+eq   'a reserved name exits 2' 2 "$rc"
+has  'a reserved name says which words are taken' 'reserved: . init config help version' "$(err)"
+hasnt 'a reserved name is never written as a profile' 'profile.config.' "$(config)"
+
+out=$(run init nope); rc=$?
+eq   'init with nothing to read exits 2' 2 "$rc"
+has  'init with nothing to read says so' 'nothing here to read an answer from' "$(err)"
+
+# init with no name is about the default, and changing it does not touch how
+# the profile itself is set up.
+write_config 'default=a' "profile.a.bin=$stub" 'profile.a.flags=--aa' 'profile.a.dir=none' \
+    "profile.b.bin=$stub" 'profile.b.flags=--bb' 'profile.b.dir=none'
+out=$(ask 'b
+' init)
+has  'init with no name sets the default' 'default=b' "$(config)"
+has  'it says the profile was already there' 'which was already configured' "$out"
+has  'the profile it points at is untouched' 'profile.b.flags=--bb' "$(config)"
+out=$(run .)
+has  'and the default now launches it' 'ARG=--bb' "$out"
+
+# --- a profile that does not exist yet -----------------------------------------
+
+write_config 'default=a' "profile.a.bin=$stub" 'profile.a.dir=none'
+out=$(ask 'none
+
+' codex --resume)
+has  'an unconfigured name is offered for setup' 'no codex profile yet' "$out"
+has  'the offer says why it is being made' 'codex is on your PATH' "$out"
+has  'the profile is written' 'profile.codex.bin=codex' "$(config)"
+hasnt 'and does not steal the default' 'default=codex' "$(config)"
+
+out=$(ask '' nosuchtool); rc=$?
+eq   'a name that is not a tool either exits 2' 2 "$rc"
+has  'it says the profile is missing' "no profile named 'nosuchtool'" "$(err)"
+has  'it says the tool is missing too' 'no ' "$(err)"
+has  'it offers the way to make one anyway' "run 'cly init nosuchtool'" "$(err)"
+
+# --- a v2 config ---------------------------------------------------------------
+
+# dir= and flags= at the top level are v2's whole config. They are read as the
+# definition of a profile called claude, and nothing is rewritten behind anyone.
+write_config "dir=$pinned"
+out=$(run .)
+has  'a v2 config still launches' "PWD=$pinned" "$out"
+has  'a v2 config with no flags= gets the standing flags' 'ARG=--remote-control' "$out"
+out=$(run claude)
+has  'and answers to the name claude' "PWD=$pinned" "$out"
+out=$(run config)
+has  'config says it is reading a v2 file' 'reading the v2 dir=/flags= lines' "$out"
+has  'the v2 file is the default' 'default:      claude' "$out"
+eq   'reading a v2 config rewrites nothing' "dir=$pinned" "$(config)"
+
+write_config "dir=$pinned" 'flags='
+out=$(run .)
+hasnt 'an empty v2 flags= means no flags' 'ARG=' "$out"
+
+write_config "dir=$pinned" 'flags=--two' "profile.claude.bin=$stub" 'profile.claude.flags=--three'
+out=$(run claude)
+has  'a real claude profile supersedes the v2 lines' 'ARG=--three' "$out"
+hasnt 'and its flags are not merged' 'ARG=--two' "$out"
+out=$(run config)
+has  'config says which one won' 'superseded by profile.claude' "$out"
+
+# --- config -------------------------------------------------------------------
+
+write_config 'default=one' "profile.one.bin=$stub" 'profile.one.flags=--standing' \
+    "profile.one.dir=$pinned" "profile.two.bin=$stub" 'profile.two.dir=none'
+out=$(run config); rc=$?
+eq   'config exits 0' 0 "$rc"
+has  'config names the file' "$CLY_CONFIG" "$out"
+has  'config names the default' 'default:      one' "$out"
+has  'config lists every profile' 'profile two:' "$out"
+has  'config shows the flags' 'flags       --standing' "$out"
+has  'config shows the directory' "launches in $pinned" "$out"
+has  'config shows where nothing is pinned' 'launches in (wherever you are standing)' "$out"
+hasnt 'config launches nothing' 'PWD=' "$out"
+
+out=$(run config two)
+has  'config NAME shows that one' 'profile two:' "$out"
+hasnt 'config NAME shows only that one' 'profile one:' "$out"
+out=$(run config .)
+has  'config . shows the default' 'profile one:' "$out"
+
+out=$(CLY_DIR="$other" run config one)
+has  'config admits an override' 'from CLY_DIR, overriding the profile' "$out"
+
 reset_config
-printf '%s\n%s\n' "$target" 'none' | "$cly" --cly-init >"$work/out" 2>&1
-has  'prompt accepts a directory' "launch directory  $target" "$(cat "$work/out")"
-has  'prompt accepts none for flags' 'standing flags    (none)' "$(cat "$work/out")"
-has  'prompt writes empty flags' 'flags=' "$(cat "$CLY_CONFIG")"
-
-reset_config
-printf '\n\n' | "$cly" --cly-init >"$work/out" 2>&1
-has  'empty answer means launch here' 'launch directory  (wherever you are)' "$(cat "$work/out")"
-has  'empty answer keeps the default flags' 'standing flags    --remote-control' "$(cat "$work/out")"
-
-# --- precedence ---------------------------------------------------------------
-
-write_config "dir=$target" 'flags=--verbose'
-out=$(run)
-has  'config flags are used' 'ARG=--verbose' "$out"
-hasnt 'config flags replace the defaults' 'ARG=--remote-control' "$out"
-
-out=$(run --cly-no-dir)
-has  '--cly-no-dir launches here' "PWD=$here" "$out"
-
-other="$work/other"; mkdir -p "$other"
-out=$(run --cly-dir "$other")
-has  '--cly-dir wins over the config' "PWD=$other" "$out"
-
-out=$(CLY_DIR="$other" run)
-has  'CLY_DIR wins over the config' "PWD=$other" "$out"
-
-out=$(CLY_DIR="$other" run --cly-no-dir)
-has  '--cly-no-dir wins over CLY_DIR' "PWD=$here" "$out"
-
-out=$(CLY_FLAGS='' run)
-hasnt 'empty CLY_FLAGS means no flags' 'ARG=' "$out"
-
-out=$(CLY_FLAGS='--one --two' run)
-has  'CLY_FLAGS wins over the config' 'ARG=--one' "$out"
-hasnt 'CLY_FLAGS replaces the config flags' 'ARG=--verbose' "$out"
-
-write_config "dir=$target" 'flags='
-out=$(run)
-hasnt 'empty flags= means no flags' 'ARG=' "$out"
-
-# --- passthrough --------------------------------------------------------------
-
-write_config "dir=$target" 'flags=--verbose'
-out=$(run --resume -p 'two words')
-has  'passthrough keeps a flag' 'ARG=--resume' "$out"
-has  'passthrough keeps a quoted argument' 'ARG=two words' "$out"
-has  'passthrough comes after the standing flags' 'ARG=--verbose' "$out"
-
-out=$(run -- --cly-no-dir)
-has  'after -- nothing is claimed by cly' 'ARG=--cly-no-dir' "$out"
-has  'after -- the directory still applies' "PWD=$target" "$out"
-
-out=$(run --cly-dir); rc=$?
-eq   '--cly-dir without a directory exits 2' 2 "$rc"
-has  '--cly-dir without a directory says usage' 'usage: cly' "$(err)"
+out=$(run config)
+has  'config with no config says so' 'none yet' "$out"
+has  'config with no config has no profiles' '(none configured)' "$out"
+eq   'config writes no config' '' "$(ls "$CLY_CONFIG" 2>/dev/null)"
 
 # --- awkward cases ------------------------------------------------------------
 
-write_config "dir=$work/deleted" 'flags='
-out=$(run)
+write_config 'default=one' "profile.one.bin=$stub" "profile.one.dir=$work/deleted"
+out=$(run .)
 has  'a deleted directory warns' 'does not exist' "$(err)"
 has  'a deleted directory still launches' "PWD=$here" "$out"
+has  'and says how to fix it' "run 'cly init one'" "$(err)"
 
-printf 'dir=%s\r\nflags=--crlf\r\n' "$target" > "$CLY_CONFIG"
-out=$(run)
-has  'a CRLF config is read' "PWD=$target" "$out"
+printf 'default=one\r\nprofile.one.bin=%s\r\nprofile.one.flags=--crlf\r\nprofile.one.dir=%s\r\n' \
+    "$stub" "$pinned" > "$CLY_CONFIG"
+out=$(run .)
+has  'a CRLF config is read' "PWD=$pinned" "$out"
 has  'a CRLF config loses the carriage return' 'ARG=--crlf' "$out"
 
 if command -v cygpath >/dev/null 2>&1; then
-    win=$(cygpath -w "$target")
-    write_config "dir=$win" 'flags='
-    out=$(run)
-    has 'a Windows path in the config is understood' "PWD=$target" "$out"
+    win=$(cygpath -w "$pinned")
+    write_config 'default=one' "profile.one.bin=$stub" "profile.one.dir=$win"
+    out=$(run .)
+    has 'a Windows path in the config is understood' "PWD=$pinned" "$out"
+    out=$(run --dir "$win" one)
+    has 'a Windows path as an option is understood' "PWD=$pinned" "$out"
 else
     note 'a Windows path in the config is understood (no cygpath)'
+    note 'a Windows path as an option is understood (no cygpath)'
 fi
 
-write_config 'dir=~' 'flags='
-out=$(run --cly-dir '~')
-has  'a tilde is expanded' "PWD=$HOME" "$out"
+write_config 'default=one' "profile.one.bin=$stub" 'profile.one.dir=~'
+out=$(run .)
+has  'a tilde in the config is expanded' "PWD=$HOME" "$out"
+out=$(run --dir '~' one)
+has  'a tilde in an option is expanded' "PWD=$HOME" "$out"
 
-# --- config report ------------------------------------------------------------
+write_config 'default=one' "profile.one.bin=$stub" 'profile.one.dir=none' \
+    '# profile.commented.bin=nope'
+out=$(run config)
+hasnt 'a commented profile is not a profile' 'profile commented' "$out"
 
-write_config "dir=$target" 'flags=--verbose'
-out=$(run --cly-config); rc=$?
-eq   '--cly-config exits 0' 0 "$rc"
-has  '--cly-config names the file' "$CLY_CONFIG" "$out"
-has  '--cly-config shows the directory' "launch dir:   $target" "$out"
-has  '--cly-config shows the flags' 'flags:        --verbose' "$out"
-has  '--cly-config shows the executable' "executable:   $stub" "$out"
-hasnt '--cly-config launches nothing' 'PWD=' "$out"
-
-reset_config
-out=$(run --cly-config)
-has  '--cly-config with no config says so' 'none yet' "$out"
-[ -f "$CLY_CONFIG" ] && bad '--cly-config writes no config' 'config was created' || ok
-
-# --- profiles -----------------------------------------------------------------
-
-# A profile that has to answer without launching anything: --cly-config reports
-# the executable, and only there can the profile's own bin be seen at all, since
-# CLY_BIN is set for the whole suite and outranks it.
-run_config() { ( unset CLY_BIN; "$cly" "$@" --cly-config </dev/null 2>"$work/err" ); }
-
-profile_config() {  # profile_config [EXTRA-LINE...]
-    write_config "dir=$target" 'flags=--verbose' \
-        'profile.codex.bin=codex' \
-        'profile.codex.flags=--full-auto' \
-        'profile.codex.dir=none' \
-        "$@"
-}
-
-profile_config
-out=$(run codex)
-has  'a bare profile name is claimed' 'ARG=--full-auto' "$out"
-hasnt 'a profile replaces the standing flags' 'ARG=--verbose' "$out"
-has  'a profile dir of none launches here' "PWD=$here" "$out"
-hasnt 'a profile name is not passed on' 'ARG=codex' "$out"
-
-out=$(run_config codex)
-has  'a profile names its own executable' 'executable:   codex' "$out"
-has  '--cly-config names the active profile' 'profile:      codex' "$out"
-has  '--cly-config lists the profiles' 'profiles:     codex' "$out"
-
-out=$(run codex --resume 'two words')
-has  'a profile still passes arguments on' 'ARG=--resume' "$out"
-has  'a profile still passes quoted arguments on' 'ARG=two words' "$out"
-
-out=$(CLY_FLAGS='--env' run codex)
-has  'CLY_FLAGS wins over a profile' 'ARG=--env' "$out"
-hasnt 'CLY_FLAGS replaces the profile flags' 'ARG=--full-auto' "$out"
-out=$(run codex --cly-dir "$other")
-has  '--cly-dir wins over a profile' "PWD=$other" "$out"
-out=$(run --cly-use codex)
-has  '--cly-use selects the same profile' 'ARG=--full-auto' "$out"
-out=$(run --cly-use codex hello)
-has  '--cly-use leaves the first word alone' 'ARG=hello' "$out"
-
-out=$(run --cly-use nope); rc=$?
-eq   '--cly-use with an unknown name exits 2' 2 "$rc"
-has  '--cly-use with an unknown name says so' "no profile named 'nope'" "$(err)"
-has  '--cly-use with an unknown name lists the names' 'profiles configured: codex' "$(err)"
-
-# Everything that is not a configured name is an argument, in the place it was
-# typed. This is the whole safety of claiming a bare word.
-out=$(run hello --resume)
-args=$(printf '%s\n' "$out" | grep '^ARG=' | tr '\n' ' ')
-eq   'an unknown first word keeps its place' 'ARG=--verbose ARG=hello ARG=--resume ' "$args"
-has  'an unknown first word leaves the config alone' "PWD=$target" "$out"
-
-out=$(run -- codex)
-has  'after -- a profile name is only an argument' 'ARG=codex' "$out"
-has  'after -- the configured directory still applies' "PWD=$target" "$out"
-
-out=$(run 'codex is broken')
-has  'a quoted argument is never a profile' 'ARG=codex is broken' "$out"
-
-# claude is a profile nobody has to configure.
-out=$(run claude)
-has  'cly claude uses the configured directory' "PWD=$target" "$out"
-has  'cly claude uses the standing flags' 'ARG=--verbose' "$out"
-hasnt 'cly claude is not passed on' 'ARG=claude' "$out"
-
-# A profile inherits what it does not mention.
-write_config "dir=$target" 'flags=--verbose' 'profile.gem.flags=--sparse'
-out=$(run gem)
-has  'a profile without dir uses the configured one' "PWD=$target" "$out"
-has  'a profile without dir keeps its own flags' 'ARG=--sparse' "$out"
-out=$(run_config gem)
-has  'a profile without bin is named after it' 'executable:   gem' "$out"
-
-write_config "dir=$target" 'flags=--verbose' 'profile.gem.bin=gemini'
-out=$(run gem)
-hasnt 'a profile without flags gets none' 'ARG=' "$out"
-out=$(run_config gem)
-has  'a profile with bin uses it' 'executable:   gemini' "$out"
-out=$(run --cly-config codex)
-has  'CLY_BIN outranks a profile' "executable:   $stub" "$out"
-
-# A commented-out example is not a profile.
-write_config "dir=$target" 'flags=' '#   profile.example.bin=example'
-out=$(run --cly-config)
-has  'a commented profile is not read' 'profiles:     (none configured)' "$out"
-
-# --cly-init rewrites two lines and must leave the rest of the file alone.
-profile_config '# a comment of my own'
-out=$(run --cly-init "$other")
-cfg=$(cat "$CLY_CONFIG")
-has  'init keeps profile lines' 'profile.codex.bin=codex' "$cfg"
-has  'init keeps profile flags' 'profile.codex.flags=--full-auto' "$cfg"
-has  'init keeps hand-written comments' '# a comment of my own' "$cfg"
-has  'init still rewrites the directory' "dir=$other" "$cfg"
-hasnt 'init leaves no second directory line' "dir=$target" "$cfg"
-
-# none is what the prompt stores for "wherever you are", and it has to read
-# back the same way in the file it was written to.
-write_config 'dir=none' 'flags='
-out=$(run)
-has  'a directory of none launches here' "PWD=$here" "$out"
+# A profile whose name is also a real argument the agent takes: the name is
+# claimed, the second one is not, because only the first word is ever cly's.
+write_config 'default=one' "profile.one.bin=$stub" 'profile.one.dir=none' \
+    "profile.two.bin=$stub" 'profile.two.dir=none'
+out=$(run one two)
+has  'only the first word is claimed' 'ARG=two' "$out"
 
 # --- shell hygiene ------------------------------------------------------------
 
@@ -321,6 +402,19 @@ fi
 
 if bash -n "$cly" 2>"$work/syn"; then ok; else bad 'bin/cly parses' "$(cat "$work/syn")"; fi
 if bash -n "$self_dir/install.sh" 2>"$work/syn"; then ok; else bad 'install.sh parses' "$(cat "$work/syn")"; fi
+
+# The script may use shell builtins and mkdir and nothing else: the .cmd door
+# can hand it a bash whose PATH carries none of the usual tools.
+for tool in sed awk cygpath grep tr cut; do
+    case $tool in
+        cygpath) continue ;;  # guarded by command -v, on purpose
+    esac
+    if grep -q "^[^#]*[^a-z-]$tool " "$cly"; then
+        bad "bin/cly does not depend on $tool" "found a call to $tool"
+    else
+        ok
+    fi
+done
 
 # --- report -------------------------------------------------------------------
 

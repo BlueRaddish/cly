@@ -1,12 +1,12 @@
 # cly
 
-Launch [Claude Code](https://claude.ai/code) from one fixed directory, with the flags you always want, from whatever shell you happen to be in.
+Launch an agent CLI — [Claude Code](https://claude.ai/code), codex, whatever you run — from a directory you pin once, with the flags you always want, from whatever shell you happen to be in.
 
 ```console
 $ pwd
 /c/some/deep/repo
-$ cly            # Claude Code starts in ~/claude; your shell stays put
-$ cly codex      # a profile: another tool, its own flags, right where you stand
+$ cly .          # Claude Code starts in ~/claude; your shell stays put
+$ cly codex      # codex, its own flags, right where you are standing
 ```
 
 ## Why
@@ -19,7 +19,7 @@ Claude Code keys its memory store off the directory it was launched from:
 
 There is one store per directory. If you keep your memories in one place — and you probably should — then launching from anywhere else loads **none** of them. Nothing errors. The memories are simply not there, and the first sign is Claude not knowing something you are certain you told it.
 
-`cly` removes the failure mode by pinning the launch directory, and carries your standing flags so those cannot be forgotten either.
+`cly` removes the failure mode by pinning the launch directory, and carries your standing flags so those cannot be forgotten either. A **profile** does the same for every other tool you run, each with its own executable, flags and directory.
 
 ## Install
 
@@ -33,103 +33,144 @@ That writes a stub into `~/bin` that runs this clone in place, so `git pull` her
 
 `~/bin` has to be on your `PATH`. On Windows that means the **User** `PATH` in the registry — a line in `~/.bashrc` is invisible to PowerShell, cmd and anything started from the Start menu. `install.sh` checks, and prints the one-liner if it is missing.
 
+Nothing is configured by the install. The first `cly init`, or the first `cly .`, asks.
+
 ## First run
 
-`cly` asks two questions, once, and remembers the answers in `~/.config/cly/config`.
-
 ```console
-$ cly
-cly: two questions, then it will not ask again.
+$ cly init
+cly: setting up the profile that 'cly .' launches.
+
+  Which tool should 'cly .' launch?
+  Enter a name — claude, codex, gemini, whatever you run.
+  [claude] >
+
+  Which flags should claude be given on every launch?
+  Enter flags, 'none' for no flags, or press Enter to take the default.
+  [--remote-control --dangerously-skip-permissions] >
 
   Claude Code keeps a separate memory store for every directory it is
   launched from, so pinning one means the same memories load each time.
-
-  Which directory should Claude Code launch from?
-  Enter a path, or press Enter to launch wherever you happen to be.
-  [none] > ~/claude
-
-  Which flags should be passed to Claude Code on every launch?
-  Enter flags, 'none' for no flags, or press Enter for the default.
-  [--remote-control --dangerously-skip-permissions] >
+  Which directory should claude launch from?
+  Enter a path, or press Enter to launch wherever you are standing.
+  [here] > ~/claude
 ```
 
-Press Enter at the first question and `cly` launches wherever you are standing — the same as plain `claude`, but with your flags. Press Enter at the second and you get `--remote-control --dangerously-skip-permissions`; type `none` for no flags at all.
+Two questions per profile, three if the name is not something on your `PATH`. `cly init NAME` sets up any other profile the same way; the first profile you make becomes the one `cly .` launches, and a later one never takes that over silently.
 
-`cly --cly-init` asks both again. `cly --cly-init DIR` sets the directory and leaves the flags alone.
+You do not have to run `init` at all. `cly .` with nothing configured runs it for you, and naming a tool you have not set up yet offers to set it up on the spot:
 
-## Flags
+```console
+$ cly codex
+cly: no codex profile yet — codex is on your PATH.
 
-Everything `cly` does not recognise goes to Claude Code untouched, so `cly --resume` and `cly -p "..."` work as they always did.
+  Which flags should codex be given on every launch?
+  ...
+```
 
-| Flag | Meaning |
+That is the whole story on a new machine: clone, install, name the tool you want.
+
+## The grammar
+
+```
+cly [OPTION...] <PROFILE|.> [AGENT-ARG...]
+```
+
+**The first word is always cly's. Everything after the profile name is always the agent's.** Neither can claim the other's flags, which is why nothing here needs a `--cly-` prefix any more.
+
+```console
+$ cly . --resume            # claude --remote-control ... --resume
+$ cly codex --search        # codex --search, plus whatever codex's profile carries
+$ cly --dir ~/work codex    # cly takes --dir; codex gets nothing extra
+$ cly one --help            # the agent's help, because it is after the name
+$ cly --help                # cly's help, because it is before one
+```
+
+A bare `cly` prints a short screen and launches nothing: with no first word, anything it did would be a guess.
+
+| Command | Meaning |
 |---|---|
-| `--cly-init [DIR]` | set launch directory and standing flags; asks when `DIR` is omitted |
-| `--cly-dir DIR` | launch from `DIR`, this call only |
-| `--cly-no-dir` | launch from the current directory, this call only |
-| `--cly-use NAME` | use profile `NAME`; the bare word, said unambiguously |
-| `--cly-config` | show what is configured and what would run |
-| `--cly-help` | show the help |
+| `cly .` | launch the default profile |
+| `cly NAME` | launch the profile called `NAME` |
+| `cly init [NAME]` | set up a profile; with no `NAME`, the one `.` launches |
+| `cly config [NAME]` | show what is configured, and what would run |
+| `cly help` | the full help |
+| `cly version` | the version |
 
-They all begin `--cly-` so that none can ever collide with a Claude Code flag. `cly --help` is therefore Claude Code's help, not `cly`'s.
+| Option | Meaning |
+|---|---|
+| `-d, --dir DIR` | launch from `DIR`, this call only |
+| `--here` | launch from the current directory, this call only |
+| `-h, --help` | show cly's help |
+| `-V, --version` | show the version |
+
+Options go **before** the profile name. Exit status is `0` when the agent was launched or a command did its work, and `2` for a usage error or a profile that could not be set up.
 
 ## Profiles
 
-Some days the tool is not Claude Code. A profile is a name in the config file with an executable, flags and a directory of its own, and it is selected by putting the name first:
+A profile is a name with an executable, flags and a launch directory of its own:
 
 ```
+default=claude
+
+profile.claude.bin=claude
+profile.claude.flags=--remote-control --dangerously-skip-permissions
+profile.claude.dir=/c/Users/me/claude
+
 profile.codex.bin=codex
 profile.codex.flags=--search
 profile.codex.dir=none
 ```
 
-```console
-$ cly codex --resume     # codex --search --resume, right where you are standing
-```
+Every line but the name is optional. A profile with no `bin=` is named after the tool it runs, so `profile.codex.dir=none` alone is enough for `cly codex`. A profile with no `dir=` launches wherever you are standing, and `none` says so explicitly — usually what you want for a tool with no memory store to pin. A profile gets **no flags it did not ask for**: standing flags belong to the profile that asked for them, and another tool would choke on them.
 
-All three lines are optional. A profile with no `bin=` is named after the tool it runs, so `profile.codex.` alone is enough for `cly codex`. A profile with no `dir=` launches from the configured directory; `dir=none` means wherever you are standing, which is usually what you want for a tool with no memory store to pin. A profile gets **no standing flags it did not ask for** — those are Claude Code's, and another tool would choke on them.
-
-`cly claude` always works and always means the defaults, configured or not.
-
-Only an exact match against a configured name is claimed, and only as the first argument, so `cly fix the parser` still reaches Claude Code intact. To pass a word that is *also* a profile name, quote the whole argument (`cly "codex is broken"`) or put `--` in front of it. `--cly-use NAME` says it the long way round, and fails loudly if there is no such profile, which is the form to use in a script.
+`default=NAME` is which profile `cly .` launches. With exactly one profile configured you can leave it out — there is nothing else `.` could mean. With several and no `default=` line, `cly .` says so and asks you to run `cly init`.
 
 ## Configuration
 
-Launch directory, most specific first: `--cly-no-dir` / `--cly-dir`, then `CLY_DIR`, then the profile, then the config file, then the first-run prompt. Standing flags: `CLY_FLAGS`, then the profile, then the config file, then the default. Executable: `CLY_BIN`, then the profile, then `claude`.
+Launch directory, most specific first: `--here` / `--dir`, then `CLY_DIR`, then the profile. Flags: `CLY_FLAGS`, then the profile. Executable: `CLY_BIN`, then the profile's `bin=`, then the profile's own name.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CLY_DIR` | — | launch directory, overriding the config file |
-| `CLY_FLAGS` | `--remote-control --dangerously-skip-permissions` | standing flags; empty means none |
-| `CLY_BIN` | `claude` | the executable, overriding the config file and any profile |
+| `CLY_DIR` | — | launch directory, overriding the profile |
+| `CLY_FLAGS` | — | flags, overriding the profile; empty means none |
+| `CLY_BIN` | — | the executable, overriding the profile |
 | `CLY_CONFIG` | `~/.config/cly/config` | where the config lives |
 | `CLY_BASH` | — | Windows only: the `bash.exe` the shim should use |
 
-The config is a handful of lines and safe to edit by hand:
+The config file is `key=value` lines and safe to edit by hand; `cly init` rewrites the profile it was given and leaves every other line — comments, other profiles, anything you added — exactly where it was. A Windows path is understood wherever a path is read, so `dir=C:\Users\me\claude` means the same thing.
 
-```
-dir=/c/Users/me/claude
-flags=--remote-control --dangerously-skip-permissions
+## Coming from v2
 
-profile.codex.bin=codex
-profile.codex.flags=--search
-profile.codex.dir=none
-```
+v3 moved every one of cly's own words to the front, where nothing can collide with an agent flag, and deleted the `--cly-` prefix that existed to prevent that collision. The old forms are gone, not deprecated.
 
-An empty `dir=`, or `none`, launches wherever you are; an empty `flags=` passes none. `--cly-init` rewrites the `dir=` and `flags=` lines and leaves everything else — profiles, comments, anything you added — where it was. A Windows path is understood wherever a path is read, so `dir=C:\Users\me\claude` means the same thing.
+| v2 | v3 |
+|---|---|
+| `cly` | `cly .` |
+| `cly --resume` | `cly . --resume` |
+| `cly --cly-init [DIR]` | `cly init [NAME]` |
+| `cly --cly-config` | `cly config` |
+| `cly --cly-help` | `cly help`, or `cly --help` |
+| `cly --cly-dir DIR` | `cly --dir DIR NAME` |
+| `cly --cly-no-dir` | `cly --here NAME` |
+| `cly --cly-use NAME` | `cly NAME` |
+
+**Your v2 config keeps working.** Top-level `dir=` and `flags=` lines are read as the definition of a profile called `claude`, and as the default, which is what they always meant; `cly config` says when it is doing that. Nothing is rewritten behind your back — the next `cly init claude` writes the new shape, and a real `profile.claude.` section supersedes the old lines when both are present.
 
 ## One implementation
 
 `bin/cly` is a bash script and is the whole program. bash, MSYS2 and WSL run it directly; PowerShell and cmd reach it through `bin/cly.cmd`, which finds a `bash.exe` and hands the invocation over with the working directory and the arguments intact. There is no second implementation to drift.
 
-The script uses shell builtins and `mkdir` and nothing else — no `sed`, `awk` or `cygpath` — because the shim may hand it a bash whose `PATH` carries none of them.
+The script uses shell builtins and `mkdir` and nothing else — no `sed`, `awk` or `cygpath` — because the shim may hand it a bash whose `PATH` carries none of them. `test.sh` checks that it stays that way.
 
 `cly.cmd` prefers Git for Windows' `bin\bash.exe`, which starts with both `/usr/bin` and the Windows `PATH` already on `PATH` and stays in the caller's directory, so no login shell is needed. MSYS2's `usr\bin\bash.exe` is the fallback and does need `-l`. `where bash` is deliberately never consulted: on a machine with WSL it answers `C:\Windows\System32\bash.exe`, a Linux shell that cannot launch a Windows `claude.exe`.
 
 ## Behaviour in the awkward cases
 
 - **The configured directory has been deleted** — warns, names it, and starts in the current directory. Staying quiet here looks exactly like memories mysteriously failing to load.
-- **No config and no terminal to ask with** (a script, a hook, a cron job) — starts in the current directory with the default flags and writes no config, rather than blocking on a question nobody can answer, or eating the stdin meant for `claude -p`.
-- **`--cly-init` with no directory and nothing to read** — exits 2 and says so.
+- **A name with no profile, and no terminal to ask at** (a script, a hook, a cron job) — exits 2 and names the profiles that do exist, rather than blocking on a question nobody can answer, or eating the stdin meant for `claude -p`.
+- **A name that is neither a profile nor a program** — exits 2 and says both, and offers `cly init NAME` for the case where you meant it anyway.
+- **Several profiles and no default** — exits 2 rather than picking one.
 
 Your shell's own working directory is untouched: `cly` is a script, so the `cd` happens in its own process.
 
@@ -139,11 +180,11 @@ Your shell's own working directory is untouched: `cly` is a script, so the `cd` 
 ./test.sh
 ```
 
-96 checks. No Claude Code is launched — `CLY_BIN` points at a stub that prints its working directory and arguments, which is the whole of what `cly` decides — and `CLY_CONFIG` points into a scratch directory, so the real config is unreachable from the suite. A dropping check count means a check stopped running, not that it started passing.
+138 checks. No agent is launched — `CLY_BIN` points at a stub that prints its working directory and arguments, which is the whole of what `cly` decides — and `CLY_CONFIG` points into a scratch directory, so the real config is unreachable from the suite. A dropping check count means a check stopped running, not that it started passing.
 
 ## A warning about the default flags
 
-The default answer to the second question includes `--dangerously-skip-permissions`, which turns off Claude Code's permission prompts entirely — every file write, every shell command, no confirmation. That is a reasonable choice on a trusted personal machine and a bad one anywhere else. The prompt shows it before anyone accepts it, and `none` or any other answer is one keystroke away.
+Setting up a profile that runs Claude Code offers `--remote-control --dangerously-skip-permissions` as the default answer, and the second of those turns off Claude Code's permission prompts entirely — every file write, every shell command, no confirmation. That is a reasonable choice on a trusted personal machine and a bad one anywhere else. It is offered, never assumed: the prompt shows it before anyone accepts it, and `none` or any other answer is one keystroke away. No other profile is offered flags at all.
 
 ## License
 

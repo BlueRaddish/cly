@@ -149,5 +149,5 @@ case ":$PATH:" in
 esac
 
 echo
-echo "cly: run 'cly' — it asks for a launch directory and your standing flags,"
-echo "cly: once, and then never again."
+echo "cly: run 'cly init' — it asks which tool to launch, with which flags,"
+echo "cly: and from which directory. After that, 'cly .' launches it."

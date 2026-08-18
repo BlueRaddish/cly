@@ -2,7 +2,7 @@
 rem cly.cmd - the Windows-side door to cly.
 rem
 rem cly is one bash script. This hands the invocation over to a bash, with the
-rem current directory and the arguments intact, so that `cly --resume` means
+rem current directory and the arguments intact, so that `cly . --resume` means
 rem the same thing typed into PowerShell, cmd, a Windows Terminal tab, VS
 rem Code's terminal or the Run box as it does in Git Bash or MSYS2.
 rem
@@ -67,7 +67,7 @@ rem pairs are escape sequences to it even inside quotes.
 set "CLY_SCRIPT=%CLY_SCRIPT:\=/%"
 
 rem Stop msys rewriting arguments that merely look like paths on the way in.
-rem `cly -p "/status of the build"` is an ordinary argument, not a filename.
+rem `cly . -p "/status of the build"` is an ordinary argument, not a filename.
 set "MSYS_NO_PATHCONV=1"
 set "MSYS2_ARG_CONV_EXCL=*"
 set "CHERE_INVOKING=1"
