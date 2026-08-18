@@ -11,6 +11,9 @@
 # something you are certain you told it. cly pins the directory so that cannot
 # happen by accident.
 #
+# A profile — `cly codex` — swaps the executable, the flags and the directory
+# for a set configured under that name, for the days you want a different tool.
+#
 # This is the whole program. bash, MSYS2 and WSL run it directly; PowerShell
 # and cmd reach it through the cly.cmd shim beside it. Install with install.sh.
 #
@@ -20,7 +23,7 @@
 
 set -u
 
-CLY_VERSION=2.0.0
+CLY_VERSION=2.1.0
 
 # The flags a bare Enter accepts at the prompt. --dangerously-skip-permissions
 # turns off every confirmation Claude Code would otherwise ask for; it is the
@@ -36,8 +39,18 @@ cfg_flags=''
 cfg_has_flags=0
 cfg_exists=0
 
+# Profiles. The name being asked for is known before the config is read, so one
+# pass can both list every name and pick up the keys of the one that is wanted.
+cly_want_profile=''
+cfg_profiles=''
+prof_bin=''
+prof_flags=''
+prof_dir=''
+prof_has_section=0
+prof_has_dir=0
+
 cly_config_load() {
-    local f line
+    local f line rest name key val
     f=$(cly_config_path)
     [ -r "$f" ] || return 0
     cfg_exists=1
@@ -46,27 +59,71 @@ cly_config_load() {
         # trailing \r in a directory name is invisible and fatal.
         line=${line%$'\r'}
         case $line in
+            # Comments go first, so the examples the config file ships with are
+            # not read back as three real profiles.
+            '#'*) continue ;;
             dir=*)   cfg_dir=${line#dir=} ;;
             flags=*) cfg_flags=${line#flags=}; cfg_has_flags=1 ;;
+            profile.*.*=*)
+                rest=${line#profile.}
+                name=${rest%%.*}
+                rest=${rest#*.}
+                key=${rest%%=*}
+                val=${rest#*=}
+                [ -n "$name" ] || continue
+                case " $cfg_profiles " in
+                    *" $name "*) ;;
+                    *) cfg_profiles="${cfg_profiles:+$cfg_profiles }$name" ;;
+                esac
+                [ "$name" = "$cly_want_profile" ] || continue
+                prof_has_section=1
+                case $key in
+                    bin)   prof_bin=$val ;;
+                    flags) prof_flags=$val ;;
+                    dir)   prof_dir=$val; prof_has_dir=1 ;;
+                esac ;;
         esac
     done < "$f"
 }
 
+# Rewrites dir= and flags=, and leaves every other line — comments, profiles,
+# anything hand-added — exactly where it was. A config is written from scratch
+# only when there is not one already.
 cly_config_save() {
-    local f dir flags parent
+    local f dir flags parent line seen_dir=0 seen_flags=0
+    local -a out=()
     dir=$1
     flags=$2
     f=$(cly_config_path)
     case $f in
         */*) parent=${f%/*}; mkdir -p "$parent" || return 1 ;;
     esac
+    if [ -r "$f" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+            line=${line%$'\r'}
+            case $line in
+                dir=*)   out+=("dir=$dir"); seen_dir=1 ;;
+                flags=*) out+=("flags=$flags"); seen_flags=1 ;;
+                *)       out+=("$line") ;;
+            esac
+        done < "$f"
+        [ "$seen_dir" = 1 ]   || out+=("dir=$dir")
+        [ "$seen_flags" = 1 ] || out+=("flags=$flags")
+        printf '%s\n' "${out[@]}" > "$f"
+        return 0
+    fi
     {
         printf '%s\n' '# cly configuration'
         printf '%s\n' '# Rewritten by `cly --cly-init`; safe to edit by hand.'
-        printf '%s\n' '# An empty dir= means launch wherever you happen to be.'
+        printf '%s\n' '# An empty dir=, or none, means launch wherever you happen to be.'
         printf '%s\n' '# An empty flags= means pass no flags of our own.'
         printf 'dir=%s\n' "$dir"
         printf 'flags=%s\n' "$flags"
+        printf '%s\n' '#'
+        printf '%s\n' '# Profiles. `cly NAME [ARG...]` launches something else instead:'
+        printf '%s\n' '#   profile.codex.bin=codex       the executable  (default: the name)'
+        printf '%s\n' '#   profile.codex.flags=--search  its flags       (default: none)'
+        printf '%s\n' '#   profile.codex.dir=none        where to launch (default: dir= above)'
     } > "$f"
 }
 
@@ -103,22 +160,32 @@ cly_expand_tilde() {
     esac
 }
 
+# A directory as a config file spells it. Empty, or the word none, means
+# "wherever you are" — the same answer an empty prompt gives.
+cly_config_dir() {
+    case $1 in
+        ''|none|NONE) ;;
+        *) cly_to_posix "$(cly_expand_tilde "$1")" ;;
+    esac
+}
+
 # --- help --------------------------------------------------------------------
 
 cly_help() {
     cat <<'EOF'
 cly — launch Claude Code from one fixed directory
 
-usage: cly [--cly-init [DIR]] [--cly-dir DIR] [--cly-no-dir] [--cly-config]
-           [--cly-help] [CLAUDE-ARG...]
+usage: cly [PROFILE] [--cly-init [DIR]] [--cly-dir DIR] [--cly-no-dir]
+           [--cly-use NAME] [--cly-config] [--cly-help] [CLAUDE-ARG...]
 
 Runs Claude Code from a directory you choose once, with flags you choose once.
 Both are asked for on the first run. Anything cly does not recognise is passed
-to Claude Code untouched.
+to Claude Code untouched. A profile launches a different tool the same way.
 
 EXAMPLES
   $ cly                        launch, from the configured directory
   $ cly --resume               the same, and --resume reaches Claude Code
+  $ cly codex                  launch the codex profile instead
   $ cly --cly-init ~/claude    pin a launch directory, keep the flags
   $ cly --cly-no-dir           launch here instead, just this once
 
@@ -126,17 +193,32 @@ OPTIONS
   --cly-init [DIR]  set launch directory and standing flags; asks when omitted
   --cly-dir DIR     launch from DIR, this call only
   --cly-no-dir      launch from the current directory, this call only
-  --cly-config      show what is configured and what would run
+  --cly-use NAME    use profile NAME; the bare word, said unambiguously
+  --cly-config      show what is configured, and what would run
   --cly-help        show this help
+
+ARGUMENTS
+  PROFILE  a configured name, given as the first argument. Three optional
+           lines in the config file make one:
+
+             profile.codex.bin=codex       the executable  (default: the name)
+             profile.codex.flags=--search  its flags       (default: none)
+             profile.codex.dir=none        where to launch (default: dir=)
+
+           A profile is given no standing flags it did not ask for: those are
+           Claude Code's, and another tool would choke on them. Only an exact
+           match on a configured name is claimed, and `cly claude` always means
+           the defaults. To pass a word that is also a profile name, quote the
+           whole argument or put -- in front of it.
 
 ENVIRONMENT
   CLY_DIR     launch directory, overriding the config file
   CLY_FLAGS   standing flags, overriding the config file; empty means none
-  CLY_BIN     the Claude Code executable (default: claude)
+  CLY_BIN     the executable, overriding the config file and any profile
   CLY_CONFIG  config file location (default: ~/.config/cly/config)
 
 FILES
-  ~/.config/cly/config   the launch directory and the standing flags
+  ~/.config/cly/config   the launch directory, the standing flags, the profiles
 
 Every flag of cly's own begins --cly-, so none can ever collide with a Claude
 Code flag. `cly --help` is therefore Claude Code's help, not this.
@@ -228,6 +310,7 @@ cly_init_apply() {
 cly_main() {
     local bin flags dir='' init_dir='' want_init=0 want_config=0 want_help=0
     local no_dir=0 rest_is_passthru=0 flags_set=0
+    local prof='' prof_explicit=0 prof_candidate='' prof_looked=0
     local -a passthru=()
 
     while [ $# -gt 0 ]; do
@@ -246,24 +329,76 @@ cly_main() {
                     return 2
                 fi
                 dir=$2; shift 2 ;;
+            --cly-use)
+                if [ $# -lt 2 ]; then
+                    echo "cly: --cly-use needs a profile name" >&2
+                    echo "usage: cly [--cly-use NAME] [CLAUDE-ARG...]" >&2
+                    return 2
+                fi
+                prof=$2; prof_explicit=1; shift 2 ;;
             --cly-no-dir) no_dir=1; shift ;;
             --cly-config) want_config=1; shift ;;
             --cly-help)   want_help=1; shift ;;
-            *) passthru+=("$1"); shift ;;
+            *)
+                # The first word that would otherwise reach Claude Code may be
+                # a profile name. Whether it is one is not known until the
+                # config has been read, so hold it back here and hand it over
+                # below if it turns out to be an ordinary argument after all.
+                if [ "$prof_looked" = 0 ]; then
+                    prof_looked=1
+                    case $1 in
+                        -*|''|*[!A-Za-z0-9_-]*) ;;
+                        *) prof_candidate=$1; shift; continue ;;
+                    esac
+                fi
+                passthru+=("$1"); shift ;;
         esac
     done
 
     [ "$want_help" = 1 ] && { cly_help; return 0; }
 
+    [ "$prof_explicit" = 1 ] || prof=$prof_candidate
+    cly_want_profile=$prof
     cly_config_load
+
+    # A name is a profile only once the config has given it a section. claude
+    # is the exception, and means the defaults, so `cly claude` works before
+    # anything at all has been configured.
+    if [ -n "$prof" ] && [ "$prof_has_section" = 0 ] && [ "$prof" != claude ]; then
+        if [ "$prof_explicit" = 1 ]; then
+            echo "cly: no profile named '$prof' in $(cly_config_path)" >&2
+            echo "cly: profiles configured: ${cfg_profiles:-(none)}" >&2
+            return 2
+        fi
+        # Not a profile: an argument for Claude Code, back at the front of the
+        # list where it was typed.
+        passthru=("$prof" ${passthru[@]+"${passthru[@]}"})
+        prof=''
+    fi
+    # --cly-use already said which profile, so the held-back word was never one.
+    if [ "$prof_explicit" = 1 ] && [ -n "$prof_candidate" ]; then
+        passthru=("$prof_candidate" ${passthru[@]+"${passthru[@]}"})
+    fi
+
     [ "$want_init" = 1 ] && { cly_init "$init_dir"; return $?; }
 
-    bin=${CLY_BIN:-claude}
+    if [ -n "${CLY_BIN:-}" ]; then
+        bin=$CLY_BIN
+    elif [ "$prof_has_section" = 1 ]; then
+        # A profile with no bin= of its own is named after the tool it runs.
+        bin=${prof_bin:-$prof}
+    else
+        bin=claude
+    fi
 
     # ${VAR+set}, not :-, so that CLY_FLAGS='' means "no flags at all" rather
     # than "fall back to the default".
     if [ "${CLY_FLAGS+set}" = set ]; then
         flags=$CLY_FLAGS; flags_set=1
+    elif [ "$prof_has_section" = 1 ]; then
+        # A profile is given the flags it asked for and no others: the standing
+        # flags are Claude Code's, and another tool would choke on them.
+        flags=$prof_flags; flags_set=1
     elif [ "$cfg_has_flags" = 1 ]; then
         flags=$cfg_flags; flags_set=1
     else
@@ -278,14 +413,16 @@ cly_main() {
         dir=$(cly_to_posix "$(cly_expand_tilde "$dir")")
     elif [ -n "${CLY_DIR:-}" ]; then
         dir=$(cly_to_posix "$(cly_expand_tilde "$CLY_DIR")")
+    elif [ "$prof_has_dir" = 1 ]; then
+        dir=$(cly_config_dir "$prof_dir")
     elif [ "$cfg_exists" = 1 ]; then
-        [ -n "$cfg_dir" ] && dir=$(cly_to_posix "$cfg_dir")
+        dir=$(cly_config_dir "$cfg_dir")
     elif [ "$want_config" = 0 ] && cly_is_interactive; then
         # First run. Ask, remember, then carry on into the launch below.
         cly_init '' || return $?
-        cfg_dir=''; cfg_flags=''; cfg_has_flags=0; cfg_exists=0
+        cfg_dir=''; cfg_flags=''; cfg_has_flags=0; cfg_exists=0; cfg_profiles=''
         cly_config_load
-        [ -n "$cfg_dir" ] && dir=$(cly_to_posix "$cfg_dir")
+        dir=$(cly_config_dir "$cfg_dir")
         [ "$flags_set" = 0 ] && [ "$cfg_has_flags" = 1 ] && flags=$cfg_flags
         echo
     fi
@@ -297,10 +434,12 @@ cly_main() {
         echo "cly $CLY_VERSION"
         echo "config file:  $(cly_config_path)"
         [ "$cfg_exists" = 1 ] || echo "              (none yet — you are asked on the first launch)"
+        [ -n "$prof" ] && echo "profile:      $prof"
         echo "launch dir:   ${dir:-(wherever you are)}"
         [ -n "${CLY_DIR:-}" ] && echo "              from CLY_DIR, overriding the config"
         echo "executable:   $bin"
         echo "flags:        ${flags:-(none)}"
+        echo "profiles:     ${cfg_profiles:-(none configured)}"
         return 0
     fi
 

@@ -207,6 +207,109 @@ out=$(run --cly-config)
 has  '--cly-config with no config says so' 'none yet' "$out"
 [ -f "$CLY_CONFIG" ] && bad '--cly-config writes no config' 'config was created' || ok
 
+# --- profiles -----------------------------------------------------------------
+
+# A profile that has to answer without launching anything: --cly-config reports
+# the executable, and only there can the profile's own bin be seen at all, since
+# CLY_BIN is set for the whole suite and outranks it.
+run_config() { ( unset CLY_BIN; "$cly" "$@" --cly-config </dev/null 2>"$work/err" ); }
+
+profile_config() {  # profile_config [EXTRA-LINE...]
+    write_config "dir=$target" 'flags=--verbose' \
+        'profile.codex.bin=codex' \
+        'profile.codex.flags=--full-auto' \
+        'profile.codex.dir=none' \
+        "$@"
+}
+
+profile_config
+out=$(run codex)
+has  'a bare profile name is claimed' 'ARG=--full-auto' "$out"
+hasnt 'a profile replaces the standing flags' 'ARG=--verbose' "$out"
+has  'a profile dir of none launches here' "PWD=$here" "$out"
+hasnt 'a profile name is not passed on' 'ARG=codex' "$out"
+
+out=$(run_config codex)
+has  'a profile names its own executable' 'executable:   codex' "$out"
+has  '--cly-config names the active profile' 'profile:      codex' "$out"
+has  '--cly-config lists the profiles' 'profiles:     codex' "$out"
+
+out=$(run codex --resume 'two words')
+has  'a profile still passes arguments on' 'ARG=--resume' "$out"
+has  'a profile still passes quoted arguments on' 'ARG=two words' "$out"
+
+out=$(CLY_FLAGS='--env' run codex)
+has  'CLY_FLAGS wins over a profile' 'ARG=--env' "$out"
+hasnt 'CLY_FLAGS replaces the profile flags' 'ARG=--full-auto' "$out"
+out=$(run codex --cly-dir "$other")
+has  '--cly-dir wins over a profile' "PWD=$other" "$out"
+out=$(run --cly-use codex)
+has  '--cly-use selects the same profile' 'ARG=--full-auto' "$out"
+out=$(run --cly-use codex hello)
+has  '--cly-use leaves the first word alone' 'ARG=hello' "$out"
+
+out=$(run --cly-use nope); rc=$?
+eq   '--cly-use with an unknown name exits 2' 2 "$rc"
+has  '--cly-use with an unknown name says so' "no profile named 'nope'" "$(err)"
+has  '--cly-use with an unknown name lists the names' 'profiles configured: codex' "$(err)"
+
+# Everything that is not a configured name is an argument, in the place it was
+# typed. This is the whole safety of claiming a bare word.
+out=$(run hello --resume)
+args=$(printf '%s\n' "$out" | grep '^ARG=' | tr '\n' ' ')
+eq   'an unknown first word keeps its place' 'ARG=--verbose ARG=hello ARG=--resume ' "$args"
+has  'an unknown first word leaves the config alone' "PWD=$target" "$out"
+
+out=$(run -- codex)
+has  'after -- a profile name is only an argument' 'ARG=codex' "$out"
+has  'after -- the configured directory still applies' "PWD=$target" "$out"
+
+out=$(run 'codex is broken')
+has  'a quoted argument is never a profile' 'ARG=codex is broken' "$out"
+
+# claude is a profile nobody has to configure.
+out=$(run claude)
+has  'cly claude uses the configured directory' "PWD=$target" "$out"
+has  'cly claude uses the standing flags' 'ARG=--verbose' "$out"
+hasnt 'cly claude is not passed on' 'ARG=claude' "$out"
+
+# A profile inherits what it does not mention.
+write_config "dir=$target" 'flags=--verbose' 'profile.gem.flags=--sparse'
+out=$(run gem)
+has  'a profile without dir uses the configured one' "PWD=$target" "$out"
+has  'a profile without dir keeps its own flags' 'ARG=--sparse' "$out"
+out=$(run_config gem)
+has  'a profile without bin is named after it' 'executable:   gem' "$out"
+
+write_config "dir=$target" 'flags=--verbose' 'profile.gem.bin=gemini'
+out=$(run gem)
+hasnt 'a profile without flags gets none' 'ARG=' "$out"
+out=$(run_config gem)
+has  'a profile with bin uses it' 'executable:   gemini' "$out"
+out=$(run --cly-config codex)
+has  'CLY_BIN outranks a profile' "executable:   $stub" "$out"
+
+# A commented-out example is not a profile.
+write_config "dir=$target" 'flags=' '#   profile.example.bin=example'
+out=$(run --cly-config)
+has  'a commented profile is not read' 'profiles:     (none configured)' "$out"
+
+# --cly-init rewrites two lines and must leave the rest of the file alone.
+profile_config '# a comment of my own'
+out=$(run --cly-init "$other")
+cfg=$(cat "$CLY_CONFIG")
+has  'init keeps profile lines' 'profile.codex.bin=codex' "$cfg"
+has  'init keeps profile flags' 'profile.codex.flags=--full-auto' "$cfg"
+has  'init keeps hand-written comments' '# a comment of my own' "$cfg"
+has  'init still rewrites the directory' "dir=$other" "$cfg"
+hasnt 'init leaves no second directory line' "dir=$target" "$cfg"
+
+# none is what the prompt stores for "wherever you are", and it has to read
+# back the same way in the file it was written to.
+write_config 'dir=none' 'flags='
+out=$(run)
+has  'a directory of none launches here' "PWD=$here" "$out"
+
 # --- shell hygiene ------------------------------------------------------------
 
 if command -v shellcheck >/dev/null 2>&1; then
