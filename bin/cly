@@ -374,9 +374,10 @@ OPTIONS
   --help` is the agent's, because after the name nothing is read by cly.
 
 ARGUMENTS
-  PROFILE  a configured name, or `.` for the default. A name with no profile
-           yet is offered for setup when there is a terminal to ask at, and
-           is an error when there is not.
+  PROFILE  a configured name, or `.` for the default. Letters, digits, dash
+           and underscore only. A name with no profile yet is offered for
+           setup when there is a terminal to ask at and a program of that
+           name on your PATH; otherwise it is an error that says so.
 
            Every config line but the name itself is optional:
 
@@ -413,28 +414,85 @@ cly_no_answer() {
     echo "cly:   $(cly_config_path)" >&2
 }
 
+# A profile name is written into a config key and read back by splitting that
+# key on its dots, so a name with a dot in it can be written and never read
+# again — and the default= line pointing at it takes the whole config with it.
+cly_is_valid_name() {  # NAME
+    case $1 in
+        ''|*[!A-Za-z0-9_-]*) return 1 ;;
+    esac
+    return 0
+}
+
+cly_name_error() {  # NAME
+    echo "cly: '$1' cannot be a profile name" >&2
+    echo "cly: letters, digits, dash and underscore only — a dot or an = would split" >&2
+    echo "cly: the config line the name is written into, and it could never be read back" >&2
+}
+
+# How a configured directory reads at a prompt.
+cly_dir_label() {  # DIR
+    case $1 in
+        ''|none|NONE) printf 'here
+' ;;
+        *) printf '%s
+' "$1" ;;
+    esac
+}
+
 # Ask what a profile is made of and write it. $1 is the name; $2, if given, is
-# printed first to say why the question is being asked at all.
+# printed first to say why the question is being asked at all. The caller loads
+# the profile first, so an existing one is *changed* here rather than replaced:
+# every question offers what is there now, and Enter keeps it.
 cly_setup_profile() {  # NAME [WHY]
-    local name=$1 why=${2:-} bin reply flags dir dflags='none'
+    local name=$1 why=${2:-} bin reply flags dir dbin dflags ddir
+
+    cly_is_valid_name "$name" || { cly_name_error "$name"; return 2; }
 
     [ -n "$why" ] && { echo "$why"; echo; }
 
-    if command -v "$name" >/dev/null 2>&1; then
+    if [ "$prof_has_section" = 1 ]; then
+        dbin=${prof_bin:-$name}
+        dflags=$prof_flags
+        ddir=$prof_dir
+    else
+        dbin=$name
+        dflags=''
+        ddir=''
+        case $name in claude) dflags=$CLY_CLAUDE_FLAGS ;; esac
+    fi
+
+    if [ "$dbin" = "$name" ] && command -v "$name" >/dev/null 2>&1; then
         bin=$name
     else
         echo "  Which executable should '$name' run?"
-        echo "  Enter a command or a path; there is no '$name' on your PATH."
-        printf '  [%s] > ' "$name"
+        if command -v "$dbin" >/dev/null 2>&1 || [ -x "$dbin" ]; then
+            echo "  Enter a command or a path."
+        else
+            echo "  Enter a command or a path; there is no '$name' on your PATH."
+        fi
+        printf '  [%s] > ' "$dbin"
         IFS= read -r reply || { cly_no_answer; return 2; }
-        bin=${reply:-$name}
+        bin=${reply:-$dbin}
+        # exec takes a program, not a command line, so `env FOO=1` would be
+        # accepted here and then fail at every launch. A path with a space in
+        # it is fine, which is why this asks whether it resolves rather than
+        # whether it has a space.
+        if ! command -v "$bin" >/dev/null 2>&1 && [ ! -x "$bin" ]; then
+            case $bin in
+                *[[:space:]]*)
+                    echo >&2
+                    echo "cly: '$bin' is a command with arguments, not a program" >&2
+                    echo "cly: name the program here and give the rest at the flags question" >&2
+                    return 2 ;;
+            esac
+        fi
+        echo
     fi
 
-    case $bin in claude|*/claude|claude.exe|*/claude.exe) dflags=$CLY_CLAUDE_FLAGS ;; esac
-
     echo "  Which flags should $name be given on every launch?"
-    echo "  Enter flags, 'none' for no flags, or press Enter to take the default."
-    printf '  [%s] > ' "$dflags"
+    echo "  Enter flags, 'none' for no flags, or press Enter to keep the default."
+    printf '  [%s] > ' "${dflags:-none}"
     IFS= read -r reply || { cly_no_answer; return 2; }
     flags=${reply:-$dflags}
     case $flags in none|NONE) flags='' ;; esac
@@ -446,10 +504,13 @@ cly_setup_profile() {  # NAME [WHY]
             echo "  launched from, so pinning one means the same memories load each time." ;;
     esac
     echo "  Which directory should $name launch from?"
-    echo "  Enter a path, or press Enter to launch wherever you are standing."
-    printf '  [%s] > ' 'here'
+    case $ddir in
+        ''|none|NONE) echo "  Enter a path, or press Enter to launch wherever you are standing." ;;
+        *)            echo "  Enter a path, 'here' to launch where you stand, or Enter to keep it." ;;
+    esac
+    printf '  [%s] > ' "$(cly_dir_label "$ddir")"
     IFS= read -r reply || { cly_no_answer; return 2; }
-    dir=$reply
+    dir=${reply:-$ddir}
     case $dir in here|HERE|none|NONE) dir='' ;; esac
     echo
 
@@ -515,6 +576,8 @@ cly_cmd_init() {  # [NAME]
     if [ -n "$name" ]; then
         cly_is_reserved "$name" && { cly_reserved_error "$name"; return 2; }
         cly_pin_implicit_default "$name" || return 1
+        # Load it first: setup offers the current values, so Enter keeps them.
+        cly_load_profile "$name"
         cly_setup_profile "$name" || return $?
         # The first profile in the file is the default without being asked:
         # there is nothing else `.` could mean. A second one never takes the
@@ -610,7 +673,7 @@ cly_no_profile_error() {  # NAME
 # --- main --------------------------------------------------------------------
 
 cly_main() {
-    local name='' target='' dir='' opt_dir='' opt_here=0 rc=0
+    local name='' target='' dir='' opt_dir='' opt_here=0 rc=0 dir_explicit=0
     local -a agent=()
 
     # cly's own options, and only before the profile name. Everything after the
@@ -711,13 +774,23 @@ cly_main() {
     cly_resolve "$name"
 
     dir=$res_dir
+    dir_explicit=0
     if [ "$opt_here" = 1 ]; then
         dir=''
     elif [ -n "$opt_dir" ]; then
         dir=$(cly_to_posix "$(cly_expand_tilde "$opt_dir")")
+        dir_explicit=1
+    elif [ -n "${CLY_DIR:-}" ]; then
+        dir_explicit=1
     fi
 
     if [ -n "$dir" ] && [ ! -d "$dir" ]; then
+        if [ "$dir_explicit" = 1 ]; then
+            # Typed just now, so it is a typo rather than a stale config, and
+            # launching in $PWD instead would be the wrong directory silently.
+            echo "cly: $dir does not exist" >&2
+            return 2
+        fi
         # Configured but gone. Worth saying: staying quiet here looks exactly
         # like memories mysteriously failing to load.
         echo "cly: $dir does not exist — launching in $PWD instead" >&2

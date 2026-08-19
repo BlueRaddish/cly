@@ -259,6 +259,7 @@ out=$(run .)
 has  'the default is still the first one' 'ARG=--search' "$out"
 
 # The claude profile is offered Claude Code's flags; nothing else is.
+reset_config
 out=$(ask '
 none
 ' init claude)
@@ -434,23 +435,44 @@ if [ -r "$CLY_CONFIG" ]; then
     note 'an unreadable config is not overwritten (chmod has no effect here)'
     note 'an unreadable config says why (chmod has no effect here)'
 else
-    out=$(ask 'none
+    out=$(ask 'agent
+none
 
 ' init two); rc=$?
-    eq   'an unreadable config is not overwritten' 2 "$rc"
-    has  'an unreadable config says why' 'cannot be read' "$(err)"
+    eq   'an unreadable config is not overwritten' 1 "$rc"
+    has  'an unreadable config says why' 'refusing to overwrite it' "$(err)"
     chmod 644 "$CLY_CONFIG"
 fi
 
 # A tool that is not on PATH is asked about, rather than assumed to exist.
 reset_config
-out=$(ask 'my-agent --flag
+out=$(ask 'my-agent
 --x
 
 ' init notonpath)
 has  'an unknown tool is asked for an executable' 'Which executable' "$out"
-has  'and the answer is what gets written' 'profile.notonpath.bin=my-agent --flag' "$(config)"
+has  'and the answer is what gets written' 'profile.notonpath.bin=my-agent' "$(config)"
 has  'and the questions do not shift' 'profile.notonpath.flags=--x' "$(config)"
+hasnt 'the two questions do not run onto one line' '>   Which flags' "$out"
+
+# A command with arguments would be accepted here and then fail at every
+# launch, because exec takes a program.
+reset_config
+out=$(ask '/usr/bin/env FOO=1
+
+' init notonpath); rc=$?
+eq   'a command with arguments is refused' 2 "$rc"
+has  'and says why' 'not a program' "$(err)"
+eq   'and writes nothing' '' "$(ls "$CLY_CONFIG" 2>/dev/null)"
+
+# A path with a space in it is not the same thing: it resolves, so it stands.
+spaced="$work/a dir"; mkdir -p "$spaced"; cp "$stub" "$spaced/agent"
+reset_config
+out=$(ask "$spaced/agent
+none
+
+" init spacey)
+has  'a path with a space is accepted' "profile.spacey.bin=$spaced/agent" "$(config)"
 
 # -- is not part of the grammar: a profile name cannot begin with a dash, so
 # there is nothing for it to protect.
@@ -458,6 +480,67 @@ write_config 'default=one' "profile.one.bin=$stub" 'profile.one.dir=none'
 out=$(run -- one); rc=$?
 eq   '-- is not an option cly knows' 2 "$rc"
 hasnt '-- launches nothing' 'PWD=' "$out"
+
+# --- changing a profile that already exists ----------------------------------
+
+# Finding 1: `cly init NAME` offers what is configured now, so Enter keeps it.
+# Losing this emptied the profile the command was aimed at.
+write_config 'default=codex' "profile.codex.bin=$stub"     'profile.codex.flags=--search --model o3' "profile.codex.dir=$pinned"
+# Three questions here, not two: this profile's executable is not its name,
+# so the bin question is asked as well, and each one offers what is set now.
+out=$(ask '
+
+
+' init codex); rc=$?
+eq   'init NAME exits 0 when every answer is kept' 0 "$rc"
+has  'init reports that it wrote the profile' 'cly: profile codex' "$out"
+has  'init offers the configured executable' "[$stub]" "$out"
+has  'init offers the configured flags' '[--search --model o3]' "$out"
+has  'init offers the configured directory' "[$pinned]" "$out"
+has  'Enter keeps the flags' 'profile.codex.flags=--search --model o3' "$(config)"
+has  'Enter keeps the directory' "profile.codex.dir=$pinned" "$(config)"
+has  'and the executable survives' "profile.codex.bin=$stub" "$(config)"
+
+out=$(ask '
+
+here
+' init codex)
+has  'here unpins a configured directory' 'profile.codex.dir=none' "$(config)"
+
+# The same on the path the README tells a v2 user to take.
+write_config "dir=$pinned" 'flags=--two'
+out=$(ask '
+
+' init claude)
+has  'converting a v2 config keeps its directory' "profile.claude.dir=$pinned" "$(config)"
+has  'converting a v2 config keeps its flags' 'profile.claude.flags=--two' "$(config)"
+
+# Finding 2: a name with a dot could be written and never read back, and the
+# default= line pointing at it took the whole config down with it.
+reset_config
+out=$(ask 'none
+
+' init 'gpt-4.1'); rc=$?
+eq   'a dotted name is refused' 2 "$rc"
+has  'and says why' 'cannot be a profile name' "$(err)"
+eq   'and writes nothing' '' "$(ls "$CLY_CONFIG" 2>/dev/null)"
+out=$(ask 'none
+
+' init 'a=b'); rc=$?
+eq   'an = in a name is refused too' 2 "$rc"
+
+# Finding 6: a directory typed just now is a typo, not a stale config.
+write_config 'default=one' "profile.one.bin=$stub" "profile.one.dir=$pinned"
+out=$(run --dir "$work/nope" one); rc=$?
+eq   'a --dir that does not exist exits 2' 2 "$rc"
+hasnt 'and launches nothing' 'PWD=' "$out"
+has  'and says which directory' "$work/nope does not exist" "$(err)"
+out=$(CLY_DIR="$work/nope" run one); rc=$?
+eq   'the same for CLY_DIR' 2 "$rc"
+write_config 'default=one' "profile.one.bin=$stub" "profile.one.dir=$work/gone"
+out=$(run one)
+has  'but a configured directory that vanished still launches here' "PWD=$here" "$out"
+has  'and warns' 'does not exist' "$(err)"
 
 # --- shell hygiene ------------------------------------------------------------
 
