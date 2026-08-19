@@ -24,6 +24,19 @@ EOF
 chmod +x "$stub"
 export CLY_BIN="$stub"
 
+# cly asks one more question when the tool being set up is not on PATH, so a
+# suite that reads PATH is a suite whose piped answers land in different
+# questions on different machines. Give it a PATH it owns.
+mkdir -p "$work/bin"
+for tool in codex claude; do
+    printf '#!/usr/bin/env bash
+printf "STUB=%%s\n" "$0"
+' > "$work/bin/$tool"
+    chmod +x "$work/bin/$tool"
+done
+PATH="$work/bin:$PATH"
+export PATH
+
 pass=0
 fail=0
 skip=0
@@ -186,7 +199,7 @@ write_config 'default=one' "profile.one.bin=$stub" 'profile.one.flags=--standing
 out=$(run two)
 hasnt 'a profile without flags gets none' 'ARG=' "$out"
 has  'a profile with dir=none launches here' "PWD=$here" "$out"
-hasnt 'one profile does not borrow another2s flags' 'ARG=--standing' "$out"
+hasnt 'one profile does not borrow the flags of another' 'ARG=--standing' "$out"
 
 # A profile with no bin of its own is named after the tool it runs.
 write_config 'default=t' 'profile.t.flags=--x'
@@ -289,7 +302,7 @@ hasnt 'and does not steal the default' 'default=codex' "$(config)"
 out=$(ask '' nosuchtool); rc=$?
 eq   'a name that is not a tool either exits 2' 2 "$rc"
 has  'it says the profile is missing' "no profile named 'nosuchtool'" "$(err)"
-has  'it says the tool is missing too' 'no ' "$(err)"
+has  'it says the tool is missing too' "and no 'nosuchtool' on your PATH" "$(err)"
 has  'it offers the way to make one anyway' "run 'cly init nosuchtool'" "$(err)"
 
 # --- a v2 config ---------------------------------------------------------------
@@ -391,6 +404,60 @@ write_config 'default=one' "profile.one.bin=$stub" 'profile.one.dir=none' \
 out=$(run one two)
 has  'only the first word is claimed' 'ARG=two' "$out"
 
+# --- what the config file survives ------------------------------------------
+
+# A lone profile is the default without a default= line. Setting up a second
+# one must not quietly make `cly .` ambiguous.
+write_config "profile.first.bin=$stub" 'profile.first.flags=--first' 'profile.first.dir=none'
+out=$(ask 'none
+
+' init codex)
+has  'a second profile pins the first as the default' 'default=first' "$(config)"
+has  'and says it did' "still launches first" "$out"
+out=$(run .)
+has  'so the default still launches' 'ARG=--first' "$out"
+
+# The same when the second profile arrives through the offer, not through init.
+write_config "profile.first.bin=$stub" 'profile.first.flags=--first' 'profile.first.dir=none'
+out=$(ask 'none
+
+' codex)
+has  'the offer pins it too' 'default=first' "$(config)"
+
+# A config that cannot be read must never be written over: cly would be
+# destroying settings it never saw.
+write_config 'default=one' "profile.one.bin=$stub" 'profile.one.dir=none'
+chmod 000 "$CLY_CONFIG" 2>/dev/null
+if [ -r "$CLY_CONFIG" ]; then
+    chmod 644 "$CLY_CONFIG"
+    note 'an unreadable config is not overwritten (chmod has no effect here)'
+    note 'an unreadable config says why (chmod has no effect here)'
+else
+    out=$(ask 'none
+
+' init two); rc=$?
+    eq   'an unreadable config is not overwritten' 2 "$rc"
+    has  'an unreadable config says why' 'cannot be read' "$(err)"
+    chmod 644 "$CLY_CONFIG"
+fi
+
+# A tool that is not on PATH is asked about, rather than assumed to exist.
+reset_config
+out=$(ask 'my-agent --flag
+--x
+
+' init notonpath)
+has  'an unknown tool is asked for an executable' 'Which executable' "$out"
+has  'and the answer is what gets written' 'profile.notonpath.bin=my-agent --flag' "$(config)"
+has  'and the questions do not shift' 'profile.notonpath.flags=--x' "$(config)"
+
+# -- is not part of the grammar: a profile name cannot begin with a dash, so
+# there is nothing for it to protect.
+write_config 'default=one' "profile.one.bin=$stub" 'profile.one.dir=none'
+out=$(run -- one); rc=$?
+eq   '-- is not an option cly knows' 2 "$rc"
+hasnt '-- launches nothing' 'PWD=' "$out"
+
 # --- shell hygiene ------------------------------------------------------------
 
 if command -v shellcheck >/dev/null 2>&1; then
@@ -405,12 +472,11 @@ if bash -n "$self_dir/install.sh" 2>"$work/syn"; then ok; else bad 'install.sh p
 
 # The script may use shell builtins and mkdir and nothing else: the .cmd door
 # can hand it a bash whose PATH carries none of the usual tools.
-for tool in sed awk cygpath grep tr cut; do
-    case $tool in
-        cygpath) continue ;;  # guarded by command -v, on purpose
-    esac
-    if grep -q "^[^#]*[^a-z-]$tool " "$cly"; then
-        bad "bin/cly does not depend on $tool" "found a call to $tool"
+# cygpath is not in this list on purpose: it is reached through command -v and
+# falls back to pure parameter expansion when it is missing.
+for tool in cat sed awk grep tr cut basename dirname; do
+    if grep -vE '^[[:space:]]*#' "$cly"         | grep -qE "(^|[^A-Za-z0-9_-])$tool([^A-Za-z0-9_-]|$)"; then
+        bad "bin/cly does not depend on $tool" "found $tool outside a comment"
     else
         ok
     fi
