@@ -35,8 +35,7 @@ CLY_VERSION=3.0.0
 # is in the path that writes the config file.
 cly_emit() {
     local line
-    while IFS= read -r line || [ -n "$line" ]; do printf '%s
-' "$line"; done
+    while IFS= read -r line || [ -n "$line" ]; do printf '%s\n' "$line"; done
 }
 
 # Offered as the default answer when the profile being set up runs Claude Code.

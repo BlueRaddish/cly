@@ -29,9 +29,10 @@ export CLY_BIN="$stub"
 # questions on different machines. Give it a PATH it owns.
 mkdir -p "$work/bin"
 for tool in codex claude; do
-    printf '#!/usr/bin/env bash
-printf "STUB=%%s\n" "$0"
-' > "$work/bin/$tool"
+    {
+        echo '#!/usr/bin/env bash'
+        echo 'printf "STUB=%s\\n" "$0"'
+    } > "$work/bin/$tool"
     chmod +x "$work/bin/$tool"
 done
 PATH="$work/bin:$PATH"
