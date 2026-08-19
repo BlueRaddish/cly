@@ -104,7 +104,7 @@ A bare `cly` prints a short screen and launches nothing: with no first word, any
 | `-h, --help` | show cly's help |
 | `-V, --version` | show the version |
 
-Options go **before** the profile name. Exit status is `0` when the agent was launched or a command did its work, and `2` for a usage error or a profile that could not be set up.
+Options go **before** the profile name. Exit status is `0` when the agent was launched or a command did its work, `1` when the config file could not be read or written, and `2` for a usage error or a profile that could not be set up.
 
 ## Profiles
 
@@ -161,7 +161,7 @@ v3 moved every one of cly's own words to the front, where nothing can collide wi
 
 `bin/cly` is a bash script and is the whole program. bash, MSYS2 and WSL run it directly; PowerShell and cmd reach it through `bin/cly.cmd`, which finds a `bash.exe` and hands the invocation over with the working directory and the arguments intact. There is no second implementation to drift.
 
-The script uses shell builtins and `mkdir` and nothing else — no `sed`, `awk` or `cygpath` — because the shim may hand it a bash whose `PATH` carries none of them. `test.sh` checks that it stays that way.
+The script uses shell builtins and `mkdir` and nothing else — not even `cat`, whose absence would otherwise break writing the config file — because the shim may hand it a bash whose `PATH` carries none of them. `cygpath` is the one exception, reached through `command -v` and falling back to parameter expansion when it is missing. `test.sh` checks that it stays that way, and the suite itself runs with a `PATH` it owns so it tests cly rather than the machine.
 
 `cly.cmd` prefers Git for Windows' `bin\bash.exe`, which starts with both `/usr/bin` and the Windows `PATH` already on `PATH` and stays in the caller's directory, so no login shell is needed. MSYS2's `usr\bin\bash.exe` is the fallback and does need `-l`. `where bash` is deliberately never consulted: on a machine with WSL it answers `C:\Windows\System32\bash.exe`, a Linux shell that cannot launch a Windows `claude.exe`.
 
@@ -180,7 +180,7 @@ Your shell's own working directory is untouched: `cly` is a script, so the `cd` 
 ./test.sh
 ```
 
-138 checks. No agent is launched — `CLY_BIN` points at a stub that prints its working directory and arguments, which is the whole of what `cly` decides — and `CLY_CONFIG` points into a scratch directory, so the real config is unreachable from the suite. A dropping check count means a check stopped running, not that it started passing.
+150 checks. No agent is launched — `CLY_BIN` points at a stub that prints its working directory and arguments, which is the whole of what `cly` decides — and `CLY_CONFIG` points into a scratch directory, so the real config is unreachable from the suite. A dropping check count means a check stopped running, not that it started passing.
 
 ## A warning about the default flags
 

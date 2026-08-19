@@ -29,7 +29,15 @@
 set -u
 
 CLY_VERSION=3.0.0
-CLY_HOME_URL=https://github.com/BlueRaddish/cly
+
+# Print a here-doc without cat, which is not a builtin: the .cmd door may hand
+# this script a bash whose PATH carries no coreutils at all, and one of these
+# is in the path that writes the config file.
+cly_emit() {
+    local line
+    while IFS= read -r line || [ -n "$line" ]; do printf '%s
+' "$line"; done
+}
 
 # Offered as the default answer when the profile being set up runs Claude Code.
 # --dangerously-skip-permissions turns off every confirmation it would ask for;
@@ -48,7 +56,6 @@ cfg_exists=0
 cfg_default=''
 cfg_profiles=''
 cfg_real_profiles=''
-cfg_legacy_used=0
 cfg_legacy=0
 cfg_legacy_dir=''
 cfg_legacy_flags=''
@@ -68,7 +75,10 @@ prof_has_dir=0
 cly_config_load() {
     local f line rest name key val
     f=$(cly_config_path)
-    [ -r "$f" ] || return 0
+    if [ ! -r "$f" ]; then
+        [ -e "$f" ] && echo "cly: $f cannot be read — ignoring it" >&2
+        return 0
+    fi
     cfg_exists=1
     while IFS= read -r line || [ -n "$line" ]; do
         # A config hand-edited in a Windows editor comes back with CRLF, and a
@@ -121,7 +131,6 @@ cly_config_legacy_fixup() {
     [ "$cly_want_profile" = claude ] || return 0
     [ "$prof_has_section" = 1 ] && return 0
     prof_has_section=1
-    cfg_legacy_used=1
     prof_bin=claude
     prof_dir=$cfg_legacy_dir
     prof_has_dir=1
@@ -148,7 +157,7 @@ cly_default_profile() {
 }
 
 cly_config_header() {
-    cat <<'EOF'
+    cly_emit <<'EOF'
 # cly configuration
 # Written by `cly init`; safe to edit by hand.
 #
@@ -165,7 +174,13 @@ cly_config_mkdir() {
     case $f in
         */*) parent=${f%/*}; [ -d "$parent" ] || mkdir -p "$parent" || return 1 ;;
     esac
-    [ -r "$f" ] || cly_config_header > "$f" || return 1
+    if [ ! -e "$f" ]; then
+        cly_config_header > "$f" || return 1
+    elif [ ! -r "$f" ]; then
+        # Never write over a file we were unable to read first.
+        echo "cly: $f exists but cannot be read — refusing to overwrite it" >&2
+        return 1
+    fi
 }
 
 # Write one profile where it already sits, or at the end if it is new, and
@@ -219,6 +234,17 @@ cly_config_put_default() {  # NAME
     done < "$f"
     [ "$wrote" = 1 ] || out+=("default=$name")
     printf '%s\n' "${out[@]}" > "$f"
+}
+
+# Called before a *new* profile is added: if the one already there was the
+# default only by being alone, say so in the file before it stops being alone.
+cly_pin_implicit_default() {  # NAME-BEING-ADDED
+    [ -z "$cfg_default" ] || return 0
+    [ -n "$cfg_profiles" ] || return 0
+    case " $cfg_profiles " in *" $1 "*) return 0 ;; esac
+    case $cfg_profiles in *' '*) return 0 ;; esac
+    cly_config_put_default "$cfg_profiles" || return 1
+    echo "cly: 'cly .' still launches $cfg_profiles"
 }
 
 # --- paths -------------------------------------------------------------------
@@ -294,7 +320,7 @@ cly_profiles_line() {  # DEFAULT-NAME
 # nothing it could launch without guessing.
 cly_brief() {
     local d
-    cat <<'EOF'
+    cly_emit <<'EOF'
 cly — launch an agent CLI from a directory you pin once
 
 usage: cly [OPTION...] <PROFILE|.> [AGENT-ARG...]
@@ -316,7 +342,7 @@ EOF
 }
 
 cly_help() {
-    cat <<'EOF'
+    cly_emit <<'EOF'
 cly — launch an agent CLI from a directory you pin once
 
 usage: cly [OPTION...] <PROFILE|.> [AGENT-ARG...]
@@ -371,6 +397,7 @@ FILES
 
 EXIT STATUS
   0  the agent was launched, or a command did its work
+  1  the config file could not be read or written
   2  a usage error, or a profile that could not be set up
 
 SEE ALSO
@@ -455,7 +482,6 @@ cly_load_profile() {  # NAME
     prof_has_section=0; prof_has_flags=0; prof_has_dir=0
     cfg_exists=0; cfg_default=''; cfg_profiles=''; cfg_real_profiles=''
     cfg_legacy=0; cfg_legacy_dir=''; cfg_legacy_flags=''; cfg_legacy_has_flags=0
-    cfg_legacy_used=0
     cly_want_profile=$1
     cly_config_load
     cly_config_legacy_fixup
@@ -489,6 +515,7 @@ cly_cmd_init() {  # [NAME]
     local name=$1 reply
     if [ -n "$name" ]; then
         cly_is_reserved "$name" && { cly_reserved_error "$name"; return 2; }
+        cly_pin_implicit_default "$name" || return 1
         cly_setup_profile "$name" || return $?
         # The first profile in the file is the default without being asked:
         # there is nothing else `.` could mean. A second one never takes the
@@ -600,7 +627,6 @@ cly_main() {
             --here)       opt_here=1; shift ;;
             -h|--help)    cly_help; return 0 ;;
             -V|--version) echo "cly $CLY_VERSION"; return 0 ;;
-            --)           shift; break ;;
             -*)           cly_unknown_option "$@"; return 2 ;;
             *)            break ;;
         esac
@@ -673,6 +699,7 @@ cly_main() {
             echo "cly: run 'cly init $name' to make one anyway" >&2
             return 2
         fi
+        cly_pin_implicit_default "$name" || return 1
         cly_setup_profile "$name" "cly: no $name profile yet — $name is on your PATH." || return $?
         if [ -z "$cfg_default" ] && [ -z "$cfg_profiles" ]; then
             cly_config_put_default "$name" || return 1
