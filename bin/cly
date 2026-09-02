@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# cly — launch an agent CLI from a directory you pin once, with the flags you
-# always want, passing everything else straight through.
+# cly — one command in front of every coding agent on the machine.
+#
+# A bare `cly` offers a menu of agents; `cly --resume` lists the sessions of
+# all of them, newest first, and reopens the one you pick where it was born;
+# `-x` adds the agent's own skip-the-prompts flag. A profile pins an executable,
+# standing flags and a launch directory under a name, so `cly claude` starts
+# Claude Code where its memories live whatever directory you are standing in.
 #
 # Claude Code keys its memory store off the directory it was launched from:
 #
@@ -13,22 +18,24 @@
 #
 # The grammar, since v3.0.0:
 #
-#     cly [OPTION...] <PROFILE|.> [AGENT-ARG...]
+#     cly [OPTION...] [PROFILE|.] [AGENT-ARG...]
 #
 # The first word is always cly's; everything after the profile name is always
 # the agent's. Neither can claim the other's flags, which is why nothing here
-# needs a --cly- prefix any more.
+# needs a --cly- prefix.
 #
 # This is the whole program. bash, MSYS2 and WSL run it directly; PowerShell
 # and cmd reach it through the cly.cmd shim beside it. Install with install.sh.
 #
 # It deliberately uses shell builtins and mkdir and nothing else: the shim may
 # hand it a bash whose PATH carries no sed, awk or cygpath, and a config file
-# of key=value lines is not worth a dependency on any of them.
+# of key=value lines is not worth a dependency on any of them. The session
+# lists are read the same way — from each agent's own index file, never from
+# the transcripts, which cost a disk open each and can number in the hundreds.
 
 set -u
 
-CLY_VERSION=3.0.0
+CLY_VERSION=4.0.0
 
 # Print a here-doc without cat, which is not a builtin: the .cmd door may hand
 # this script a bash whose PATH carries no coreutils at all, and one of these
@@ -39,13 +46,14 @@ cly_emit() {
 }
 
 # Offered as the default answer when the profile being set up runs Claude Code.
-# --dangerously-skip-permissions turns off every confirmation it would ask for;
-# it is offered rather than assumed, and the prompt shows it before anyone
-# accepts it.
-CLY_CLAUDE_FLAGS='--remote-control --dangerously-skip-permissions'
+# Skipping permissions is no longer part of it: that is what -x is for.
+CLY_CLAUDE_FLAGS='--remote-control'
 
 # A profile may not take one of these names: the first word means these first.
 CLY_RESERVED='. init config help version'
+
+# Field separator inside a session row. Never appears in a path or a prompt.
+CLY_US=$'\x1f'
 
 cly_config_path() { printf '%s\n' "${CLY_CONFIG:-$HOME/.config/cly/config}"; }
 
@@ -67,6 +75,8 @@ cly_want_profile=''
 prof_bin=''
 prof_flags=''
 prof_dir=''
+prof_kind=''
+prof_env=''
 prof_has_section=0
 prof_has_flags=0
 prof_has_dir=0
@@ -110,6 +120,8 @@ cly_config_load() {
                     bin)   prof_bin=$val ;;
                     flags) prof_flags=$val; prof_has_flags=1 ;;
                     dir)   prof_dir=$val; prof_has_dir=1 ;;
+                    kind)  prof_kind=$val ;;
+                    env)   prof_env=$val ;;
                 esac ;;
         esac
     done < "$f"
@@ -164,6 +176,10 @@ cly_config_header() {
 #   profile.NAME.bin=EXE      the executable        (default: the profile name)
 #   profile.NAME.flags=FLAGS  flags on every launch (default: none)
 #   profile.NAME.dir=PATH     where to launch from  (default: here; none = here)
+#   profile.NAME.kind=KIND    which agent this is, for -x and --resume
+#                             (default: the executable's name)
+#   profile.NAME.env=K=V ...  environment to set first; a value of $NAME is
+#                             taken from your environment
 EOF
 }
 
@@ -184,9 +200,11 @@ cly_config_mkdir() {
 
 # Write one profile where it already sits, or at the end if it is new, and
 # leave every other line — comments, other profiles, anything hand-added —
-# exactly where it was.
-cly_config_put_profile() {  # NAME BIN FLAGS DIR
-    local name=$1 bin=$2 flags=$3 dir=$4 f line wrote=0
+# exactly where it was. The profile's own lines that setup does not ask about
+# (kind, env, anything newer than this script) are kept in place too; a kind
+# is replaced only when a new one is given.
+cly_config_put_profile() {  # NAME BIN FLAGS DIR [KIND]
+    local name=$1 bin=$2 flags=$3 dir=$4 kind=${5:-} f line rest key wrote=0
     local -a out=()
     f=$(cly_config_path)
     cly_config_mkdir || return 1
@@ -199,7 +217,15 @@ cly_config_put_profile() {  # NAME BIN FLAGS DIR
                     out+=("profile.$name.bin=$bin")
                     out+=("profile.$name.flags=$flags")
                     out+=("profile.$name.dir=$dir")
-                fi ;;
+                    [ -n "$kind" ] && out+=("profile.$name.kind=$kind")
+                fi
+                rest=${line#profile.$name.}
+                key=${rest%%=*}
+                case $key in
+                    bin|flags|dir) ;;
+                    kind) [ -n "$kind" ] || out+=("$line") ;;
+                    *) out+=("$line") ;;
+                esac ;;
             *) out+=("$line") ;;
         esac
     done < "$f"
@@ -208,6 +234,7 @@ cly_config_put_profile() {  # NAME BIN FLAGS DIR
         out+=("profile.$name.bin=$bin")
         out+=("profile.$name.flags=$flags")
         out+=("profile.$name.dir=$dir")
+        [ -n "$kind" ] && out+=("profile.$name.kind=$kind")
     fi
     printf '%s\n' "${out[@]}" > "$f"
 }
@@ -248,22 +275,33 @@ cly_pin_implicit_default() {  # NAME-BEING-ADDED
 
 # --- paths -------------------------------------------------------------------
 
+# C:\Users\me\claude → /c/Users/me/claude, without leaving the shell. Enough
+# for comparing and displaying paths; the launch itself goes through
+# cly_to_posix, which asks cygpath when there is one.
+posix=''
+cly_win_to_posix() {  # PATH → posix
+    local p=$1 drive rest
+    case $p in
+        [A-Za-z]:[/\\]*)
+            drive=${p%%:*}
+            rest=${p#*:}
+            posix="/${drive,,}${rest//\\//}" ;;
+        *) posix=$p ;;
+    esac
+}
+
 # Accept a Windows path wherever a path is read. Someone standing in PowerShell
 # types C:\Users\me\claude at the prompt, and that has to mean the same
 # directory as /c/Users/me/claude does to the bash this script is running in.
-# The drive letter is left in whatever case it arrived: /C/Users and /c/Users
-# name the same directory on the only filesystems that have drive letters.
 cly_to_posix() {
-    local p drive rest
-    p=$1
+    local p=$1
     case $p in
         [A-Za-z]:[/\\]*)
             if command -v cygpath >/dev/null 2>&1; then
                 cygpath -u "$p"
             else
-                drive=${p%%:*}
-                rest=${p#*:}
-                printf '/%s%s\n' "$drive" "${rest//\\//}"
+                cly_win_to_posix "$p"
+                printf '%s\n' "$posix"
             fi ;;
         *) printf '%s\n' "$p" ;;
     esac
@@ -288,6 +326,14 @@ cly_config_dir() {
     esac
 }
 
+# The last path component, without a .exe. What a profile's kind defaults to.
+cly_basename() {
+    local b=${1##*/}
+    b=${b##*\\}
+    b=${b%.exe}
+    printf '%s\n' "${b%.EXE}"
+}
+
 # Whether there is a human on the other end to answer a prompt. CLY_ASSUME_TTY
 # exists so the suite can exercise the prompts, which have no other way to be
 # reached without a terminal.
@@ -299,6 +345,517 @@ cly_is_interactive() {
 cly_is_reserved() {  # NAME
     case " $CLY_RESERVED " in *" $1 "*) return 0 ;; esac
     return 1
+}
+
+# --- agents ------------------------------------------------------------------
+
+# What cly knows about each kind of agent: the flag that skips its permission
+# prompts, and the words that reopen one of its sessions by id. A profile's
+# kind is its executable's name unless profile.NAME.kind says otherwise, which
+# is how `ollama launch claude` counts as Claude Code.
+CLY_KINDS='claude codex gemini kimi qwen opencode'
+
+# The kinds whose sessions -r can list. Qwen Code and OpenCode keep theirs in
+# shapes this script cannot read (a per-directory tree it cannot map back to
+# a directory; a database).
+CLY_LISTABLE='claude codex gemini kimi'
+
+kind_label=''
+kind_bypass=''
+kind_resume=''
+cly_kind_info() {  # KIND → the three above; 1 if cly has never heard of it
+    kind_label='' kind_bypass='' kind_resume=''
+    case $1 in
+        claude)   kind_label='Claude Code'; kind_bypass=--dangerously-skip-permissions; kind_resume=--resume ;;
+        codex)    kind_label='Codex';       kind_bypass=--dangerously-bypass-approvals-and-sandbox; kind_resume=resume ;;
+        gemini)   kind_label='Gemini CLI';  kind_bypass=--yolo; kind_resume=--resume ;;
+        kimi)     kind_label='Kimi Code';   kind_bypass=--yolo; kind_resume=--session ;;
+        qwen)     kind_label='Qwen Code';   kind_bypass=--yolo; kind_resume=--resume ;;
+        opencode) kind_label='OpenCode';    kind_bypass=--auto; kind_resume=--session ;;
+        *) return 1 ;;
+    esac
+}
+
+# The menu a bare `cly` offers: every kind above, plus the models that have no
+# terminal agent of their own and reach one through Ollama instead. Each entry
+# knows how to get itself and how to sign in, so picking one that is not here
+# yet prints the two lines that would make it so.
+CLY_CATALOG='claude codex gemini kimi qwen opencode deepseek meta'
+
+cat_label=''
+cat_bin=''
+cat_kind=''
+cat_flags=''
+cat_install=''
+cat_login=''
+cly_catalog_info() {  # NAME → the six above; 1 if not in the catalog
+    cat_label='' cat_bin='' cat_kind='' cat_flags='' cat_install='' cat_login=''
+    case $1 in
+        claude)   cat_label='Claude Code'; cat_bin=claude; cat_flags=$CLY_CLAUDE_FLAGS
+                  cat_install='npm install -g @anthropic-ai/claude-code'
+                  cat_login='claude, then /login' ;;
+        codex)    cat_label='Codex'; cat_bin=codex
+                  cat_install='npm install -g @openai/codex'
+                  cat_login='codex login' ;;
+        gemini)   cat_label='Gemini CLI'; cat_bin=gemini
+                  cat_install='npm install -g @google/gemini-cli'
+                  cat_login='gemini, then pick "Login with Google"' ;;
+        kimi)     cat_label='Kimi Code'; cat_bin=kimi
+                  cat_install='npm install -g @moonshot-ai/kimi-code'
+                  cat_login='kimi, then /login' ;;
+        qwen)     cat_label='Qwen Code'; cat_bin=qwen
+                  cat_install='npm install -g @qwen-code/qwen-code'
+                  cat_login='qwen, then /auth (a key or a coding plan)' ;;
+        opencode) cat_label='OpenCode'; cat_bin=opencode
+                  cat_install='npm install -g opencode-ai'
+                  cat_login='opencode auth login' ;;
+        # No terminal agent of its own signs you in with a DeepSeek account.
+        # An Ollama account does, and `ollama launch claude` runs Claude Code
+        # against one of Ollama's hosted models; everything after the -- is
+        # Claude Code's, which is where -x and --resume land.
+        deepseek) cat_label='DeepSeek'; cat_bin=ollama; cat_kind=claude
+                  cat_flags='launch claude --model deepseek-v4-pro --'
+                  cat_install='ollama, from https://ollama.com/download'
+                  cat_login='ollama signin' ;;
+        # Meta hosts no Llama API any more and no agent signs in with Meta, so
+        # Llama runs on this machine: pull the weights once, then the same
+        # Claude-Code-through-Ollama route as above.
+        meta)     cat_label='Llama'; cat_bin=ollama; cat_kind=claude
+                  cat_flags='launch claude --model llama3.1 --'
+                  cat_install='ollama, from https://ollama.com/download, then: ollama pull llama3.1'
+                  cat_login='none — the model runs here' ;;
+        *) return 1 ;;
+    esac
+    [ -n "$cat_kind" ] || cat_kind=$1
+}
+
+cly_is_kind() {  # NAME
+    case " $CLY_KINDS " in *" $1 "*) return 0 ;; esac
+    return 1
+}
+
+cly_is_listable() {  # KIND
+    case " $CLY_LISTABLE " in *" $1 "*) return 0 ;; esac
+    return 1
+}
+
+# --- sessions ----------------------------------------------------------------
+#
+# Every agent keeps its own store, and every store has an index cheap enough to
+# read whole. A session becomes one row — EPOCH KIND ID CWD TITLE, separated by
+# CLY_US — and the rows of every agent are merged, sorted and shown together.
+# Reading a store is deliberately: one file into a string, split on newlines,
+# then parameter expansion. `mapfile` reads 128 bytes at a time and is 25x
+# slower on the index sizes measured; a transcript open costs 5–80 ms each, so
+# a store that has no index is only opened for the rows that will be shown.
+#
+# Nothing in here forks. On Windows a $(...) costs 30–80 ms, and the index has
+# one line per prompt ever typed, so the small functions below hand their
+# answer back in a global (jv, epoch, posix, age, where, title) instead of
+# printing it. Measured: the same listing took 38 s with substitutions and
+# under a second without.
+
+ses_rows=()
+lines=()
+jv=''
+epoch=0
+
+# Split FILE into lines[]: a whole-file read, no loop of reads. Globbing is
+# off for the split because a prompt may well contain a *.
+cly_read_lines() {  # FILE
+    local c
+    local IFS=$'\n'
+    lines=()
+    [ -r "$1" ] || return 1
+    c=$(<"$1") || return 1
+    set -f
+    lines=($c)
+    set +f
+}
+
+# JSON's backslash escapes, enough of them for a path or a prompt: the pairs
+# that appear in practice, done in an order that keeps \\n a backslash and an
+# n. Titles are cut short before they get here, so this stays cheap.
+cly_json_unescape() {  # TEXT → jv
+    local s=$1
+    s=${s//\\\\/$'\x01'}
+    s=${s//\\\"/\"}
+    s=${s//\\n/ }
+    s=${s//\\t/ }
+    s=${s//\\r/}
+    s=${s//\\\//\/}
+    jv=${s//$'\x01'/\\}
+}
+
+# 2026-08-25T07:50:31.238Z → seconds since the epoch, in the shell. Days from
+# civil date after Howard Hinnant; 10# because 08 is not octal.
+cly_iso_epoch() {  # ISO → epoch
+    local s=$1 y m d H M S era yoe doy doe days
+    case $s in
+        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9][:-][0-9][0-9]*) ;;
+        *) epoch=0; return 1 ;;
+    esac
+    y=$((10#${s:0:4})); m=$((10#${s:5:2})); d=$((10#${s:8:2}))
+    H=$((10#${s:11:2})); M=$((10#${s:14:2}))
+    case ${s:17:2} in [0-9][0-9]) S=$((10#${s:17:2})) ;; *) S=0 ;; esac
+    [ "$m" -le 2 ] && y=$((y - 1))
+    era=$(( y / 400 ))
+    yoe=$(( y - era * 400 ))
+    if [ "$m" -gt 2 ]; then doy=$(( (153 * (m - 3) + 2) / 5 + d - 1 ))
+    else doy=$(( (153 * (m + 9) + 2) / 5 + d - 1 )); fi
+    doe=$(( yoe * 365 + yoe / 4 - yoe / 100 + doy ))
+    days=$(( era * 146097 + doe - 719468 ))
+    epoch=$(( days * 86400 + H * 3600 + M * 60 + S ))
+}
+
+# A timestamp as an agent wrote it — ISO, seconds, or milliseconds — as
+# seconds.
+cly_epoch() {  # TIMESTAMP → epoch
+    case $1 in
+        '') epoch=0 ;;
+        *[!0-9]*) cly_iso_epoch "$1" ;;
+        *) if [ ${#1} -gt 11 ]; then epoch=$(( $1 / 1000 )); else epoch=$1; fi ;;
+    esac
+}
+
+# The value of KEY in a one-line JSON object, when it is a string: the text
+# between the quotes, still escaped. Takes the LAST occurrence, because the
+# indexes put their own keys after the user's text, and the user's text can
+# only hold the key's name behind a backslash. Pretty-printed JSON has a space
+# after the colon; callers close it first (line=${line//\": /\":}).
+cly_json_str() {  # KEY LINE → jv; 1 when the key is not there
+    jv=${2##*\"$1\":\"}
+    [ "$jv" != "$2" ] || { jv=''; return 1; }
+    jv=${jv%%\"*}
+}
+
+# The same for a number.
+cly_json_num() {  # KEY LINE → jv; 0 and 1 when the key is not there
+    jv=${2##*\"$1\":}
+    [ "$jv" != "$2" ] || { jv=0; return 1; }
+    jv=${jv%%[,\}]*}
+    jv=${jv%%.*}
+    case $jv in ''|*[!0-9]*) jv=0; return 1 ;; esac
+}
+
+cly_add_row() {  # EPOCH KIND ID CWD TITLE
+    ses_rows+=("$1$CLY_US$2$CLY_US$3$CLY_US$4$CLY_US$5")
+}
+
+# Claude Code. Every prompt typed into a session is one line of history.jsonl:
+# display, timestamp (ms), project (the launch directory) and sessionId. The
+# first prompt that was not a slash command is a session's title, the last
+# prompt is its age, and a session whose transcript has since been cleaned up
+# is not offered.
+cly_sessions_claude() {
+    local root=${CLAUDE_CONFIG_DIR:-$HOME/.claude} line sid ts text pdir
+    local -a order=()
+    local -A first any cwd last
+    cly_read_lines "$root/history.jsonl" || return 0
+    for line in "${lines[@]}"; do
+        case $line in *'"sessionId":"'*) ;; *) continue ;; esac
+        cly_json_str sessionId "$line"; sid=$jv
+        cly_json_num timestamp "$line"; ts=$jv
+        if [ -z "${any[$sid]+x}" ]; then
+            cly_json_str project "$line"; cly_json_unescape "$jv"; cwd[$sid]=$jv
+            any[$sid]=''
+            order+=("$sid")
+        fi
+        last[$sid]=$ts
+        [ -z "${first[$sid]+x}" ] || continue
+        text=${line#*\"display\":\"}
+        text=${text%%\",\"pastedContents\"*}
+        text=${text:0:120}
+        case $text in
+            /*) [ -n "${any[$sid]}" ] || any[$sid]=$text ;;
+            *)  first[$sid]=$text ;;
+        esac
+    done
+    for sid in "${order[@]}"; do
+        # The transcript lives under the launch directory with every byte that
+        # is not a letter or a digit turned into a dash.
+        pdir=${cwd[$sid]//[^A-Za-z0-9]/-}
+        [ -s "$root/projects/$pdir/$sid.jsonl" ] || continue
+        cly_add_row "$(( ${last[$sid]} / 1000 ))" claude "$sid" "${cwd[$sid]}" "${first[$sid]:-${any[$sid]}}"
+    done
+}
+
+# Codex. history.jsonl has one line per typed prompt — session_id, ts, text —
+# and session_index.jsonl the name a thread was given. A session is only there
+# to resume while its rollout file is; the launch directory is inside that
+# file, so it is read later, for the rows that are shown (cly_session_cwd).
+cly_sessions_codex() {
+    local root=${CODEX_HOME:-$HOME/.codex} line sid ts text f
+    local -a order=()
+    local -A first last title rollout
+    cly_read_lines "$root/history.jsonl" || return 0
+    for line in "${lines[@]}"; do
+        case $line in *'"session_id":"'*) ;; *) continue ;; esac
+        sid=${line#*\"session_id\":\"}; sid=${sid%%\"*}
+        cly_json_num ts "$line"; ts=$jv
+        if [ -z "${first[$sid]+x}" ]; then
+            text=${line#*\"text\":\"}
+            text=${text%\"\}}
+            first[$sid]=${text:0:120}
+            order+=("$sid")
+        fi
+        last[$sid]=$ts
+    done
+    if cly_read_lines "$root/session_index.jsonl"; then
+        for line in "${lines[@]}"; do
+            sid=${line#*\"id\":\"}; sid=${sid%%\"*}
+            cly_json_str thread_name "$line" && title[$sid]=$jv
+        done
+    fi
+    # rollout-2026-08-25T00-50-31-<id>.jsonl: the id is the tail of the name.
+    for f in "$root"/sessions/*/*/*/rollout-*.jsonl; do
+        [ -e "$f" ] || continue
+        sid=${f%.jsonl}; sid=${sid: -36}
+        rollout[$sid]=$f
+    done
+    for sid in "${order[@]}"; do
+        [ -n "${rollout[$sid]+x}" ] || continue
+        cly_add_row "${last[$sid]}" codex "$sid" '' "${title[$sid]:-${first[$sid]}}"
+    done
+}
+
+# The N names that sort last, in that order — for files whose name carries
+# their date, so the newest can be chosen without a stat each.
+newest=()
+cly_newest_by_name() {  # N FILE...
+    local n=$1 i j best tmp
+    shift
+    local -a fs=("$@")
+    newest=()
+    [ "$n" -lt "${#fs[@]}" ] || n=${#fs[@]}
+    for ((i = 0; i < n; i++)); do
+        best=$i
+        for ((j = i + 1; j < ${#fs[@]}; j++)); do
+            [[ ${fs[j]##*/} > ${fs[best]##*/} ]] && best=$j
+        done
+        tmp=${fs[i]}; fs[i]=${fs[best]}; fs[best]=$tmp
+    done
+    newest=("${fs[@]:0:$n}")
+}
+
+# Gemini CLI. One file per session under tmp/<project>/chats/, named by its
+# start time, so the newest are known before any is opened. The first lines
+# name the session and when it was last touched; the first user message is a
+# few lines further. The project directory is a slug of the project's name:
+# its .project_root file, or projects.json, says which directory that was.
+cly_sessions_gemini() {
+    local root=${GEMINI_CLI_HOME:-$HOME/.gemini} f line sid ts start text slug pdir dir i user
+    local -a files=()
+    local -A slugdir
+    for f in "$root"/tmp/*/chats/session-*.json*; do [ -s "$f" ] && files+=("$f"); done
+    [ ${#files[@]} -gt 0 ] || return 0
+    if cly_read_lines "$root/projects.json"; then
+        # "<path>": "<slug>", one pair per line when pretty-printed.
+        for line in "${lines[@]}"; do
+            line=${line//\": /\":}
+            line=${line#"${line%%[!$' \t']*}"}
+            case $line in \"*\":\"*\"*) ;; *) continue ;; esac
+            dir=${line#\"}; dir=${dir%%\"*}
+            slug=${line##*\":\"}; slug=${slug%%\"*}
+            cly_json_unescape "$dir"; slugdir[$slug]=$jv
+        done
+    fi
+    cly_newest_by_name "${CLY_ROWS:-30}" "${files[@]}"
+    for f in "${newest[@]}"; do
+        sid=''; ts=''; start=''; text=''; user=0; i=0
+        while IFS= read -r line && [ "$i" -lt 60 ]; do
+            i=$((i + 1))
+            line=${line//\": /\":}
+            case $line in *'"kind":"subagent"'*) sid=''; break ;; esac
+            if [ -z "$sid" ]; then cly_json_str sessionId "$line" && sid=$jv; fi
+            case $line in
+                *'"lastUpdated":"'*) cly_json_str lastUpdated "$line" && ts=$jv ;;
+                *'"startTime":"'*)   if [ -z "$start" ]; then cly_json_str startTime "$line" && start=$jv; fi ;;
+            esac
+            if [ -z "$text" ]; then
+                case $line in *'"type":"user"'*) user=1 ;; esac
+                if [ "$user" = 1 ]; then
+                    case $line in
+                        *'"text":"'*)    cly_json_str text "$line" && text=$jv ;;
+                        *'"content":"'*) cly_json_str content "$line" && text=$jv ;;
+                    esac
+                fi
+            fi
+            [ -n "$sid" ] && [ -n "$ts" ] && [ -n "$text" ] && break
+        done < "$f"
+        [ -n "$sid" ] || continue
+        pdir=${f%/chats/*}
+        slug=${pdir##*/}
+        dir=${slugdir[$slug]:-}
+        if [ -r "$pdir/.project_root" ]; then
+            IFS= read -r line < "$pdir/.project_root" || true
+            [ -n "$line" ] && dir=${line%$'\r'}
+        fi
+        if [ -z "$ts$start" ]; then
+            # session-2026-09-01T12-34-<id>: the file's own name, then.
+            start=${f##*/session-}
+            start="${start:0:13}:${start:14:2}"
+        fi
+        cly_epoch "${ts:-$start}"
+        cly_add_row "$epoch" gemini "$sid" "$dir" "${text:0:120}"
+    done
+}
+
+# Kimi Code. session_index.jsonl lists every session and its directory, in
+# the order they were made; each session's state.json holds its title, last
+# prompt, working directory and last-touched time. The index is read whole
+# and only the last few dozen sessions are opened.
+cly_sessions_kimi() {
+    local root=${KIMI_CODE_HOME:-$HOME/.kimi-code} line sid sdir f title prompt ts cwd i n
+    local -a ids=()
+    local -A dir dead
+    if cly_read_lines "$root/session_index.jsonl"; then
+        for line in "${lines[@]}"; do
+            cly_json_str sessionId "$line" || continue
+            sid=$jv
+            case $line in *'"deleted":true'*) dead[$sid]=1; continue ;; esac
+            cly_json_str sessionDir "$line" || continue
+            cly_json_unescape "$jv"; cly_win_to_posix "$jv"; sdir=$posix
+            case $sdir in /*) ;; *) sdir=$root/$sdir ;; esac
+            [ -n "${dir[$sid]+x}" ] || ids+=("$sid")
+            dir[$sid]=$sdir
+        done
+    else
+        for f in "$root"/sessions/*/*/state.json; do
+            [ -s "$f" ] || continue
+            sdir=${f%/state.json}
+            sid=${sdir##*/}
+            ids+=("$sid"); dir[$sid]=$sdir
+        done
+    fi
+    n=${#ids[@]}
+    i=$(( n - 2 * ${CLY_ROWS:-30} )); [ "$i" -gt 0 ] || i=0
+    for sid in "${ids[@]:$i}"; do
+        [ -z "${dead[$sid]+x}" ] || continue
+        f=${dir[$sid]}/state.json
+        [ -s "$f" ] || continue
+        title=''; prompt=''; ts=''; cwd=''; n=0
+        while IFS= read -r line && [ "$n" -lt 60 ]; do
+            n=$((n + 1))
+            line=${line//\": /\":}
+            case $line in
+                *'"archived":true'*) ts=''; break ;;
+                *'"title":"'*)      cly_json_str title "$line" && title=$jv ;;
+                *'"lastPrompt":"'*) cly_json_str lastPrompt "$line" && prompt=$jv ;;
+                *'"updatedAt":"'*)  cly_json_str updatedAt "$line" && ts=$jv ;;
+                *'"updatedAt":'*)   cly_json_num updatedAt "$line" && ts=$jv ;;
+                *'"cwd":"'*)        if [ -z "$cwd" ]; then cly_json_str cwd "$line" && cwd=$jv; fi ;;
+                *'"workDir":"'*)    if [ -z "$cwd" ]; then cly_json_str workDir "$line" && cwd=$jv; fi ;;
+            esac
+        done < "$f"
+        [ -n "$ts" ] || continue
+        cly_epoch "$ts"
+        cly_json_unescape "$cwd"
+        cly_add_row "$epoch" kimi "$sid" "$jv" "${title:-${prompt:0:120}}"
+    done
+}
+
+# Where a session was born, for the kinds whose index does not say: found in
+# the session's own file, one open per row shown.
+cly_session_cwd() {  # KIND ID → jv
+    local root f line
+    jv=''
+    case $1 in
+        codex)
+            root=${CODEX_HOME:-$HOME/.codex}
+            for f in "$root"/sessions/*/*/*/rollout-*-"$2".jsonl; do
+                [ -s "$f" ] || continue
+                IFS= read -r line < "$f" || true
+                cly_json_str cwd "$line" && cly_json_unescape "$jv"
+                return 0
+            done ;;
+    esac
+}
+
+cly_sessions_all() {  # [KIND]
+    local k
+    ses_rows=()
+    for k in $CLY_LISTABLE; do
+        [ -z "${1:-}" ] || [ "$1" = "$k" ] || continue
+        "cly_sessions_$k"
+    done
+}
+
+# Bring the N newest rows to the front, in order. Selection, not a full sort:
+# the rows behind them are never shown.
+cly_top_rows() {  # N
+    local n=${#ses_rows[@]} i j best tmp want=$1
+    [ "$want" -lt "$n" ] || want=$n
+    for ((i = 0; i < want; i++)); do
+        best=$i
+        for ((j = i + 1; j < n; j++)); do
+            [ "${ses_rows[j]%%"$CLY_US"*}" -gt "${ses_rows[best]%%"$CLY_US"*}" ] && best=$j
+        done
+        if [ "$best" != "$i" ]; then
+            tmp=${ses_rows[i]}; ses_rows[i]=${ses_rows[best]}; ses_rows[best]=$tmp
+        fi
+    done
+}
+
+# Take a row apart into row_epoch, row_kind, row_id, row_cwd, row_title.
+row_epoch=''; row_kind=''; row_id=''; row_cwd=''; row_title=''
+cly_row_fields() {  # ROW
+    local r=$1
+    row_epoch=${r%%"$CLY_US"*}; r=${r#*"$CLY_US"}
+    row_kind=${r%%"$CLY_US"*};  r=${r#*"$CLY_US"}
+    row_id=${r%%"$CLY_US"*};    r=${r#*"$CLY_US"}
+    row_cwd=${r%%"$CLY_US"*};   r=${r#*"$CLY_US"}
+    row_title=$r
+}
+
+# "17m ago", "3h ago", "5d ago", then the date.
+age=''
+cly_age() {  # EPOCH → age
+    local now d
+    printf -v now '%(%s)T' -1
+    d=$(( now - $1 ))
+    if   [ "$1" -le 0 ];      then age='?'
+    elif [ "$d" -lt 60 ];     then age=now
+    elif [ "$d" -lt 3600 ];   then age="$(( d / 60 ))m ago"
+    elif [ "$d" -lt 86400 ];  then age="$(( d / 3600 ))h ago"
+    elif [ "$d" -lt 604800 ]; then age="$(( d / 86400 ))d ago"
+    else printf -v age '%(%b %d)T' "$1"
+    fi
+}
+
+# A directory as the table shows it: ~ for home, the tail kept when it is cut,
+# because the end of a path is the part that tells them apart.
+where=''
+cly_where() {  # CWD WIDTH → where
+    cly_win_to_posix "$1"
+    where=$posix
+    case $where in
+        "$HOME")   where='~' ;;
+        "$HOME"/*) where="~${where#"$HOME"}" ;;
+    esac
+    [ ${#where} -le "$2" ] || where="...${where: -$(( $2 - 3 ))}"
+}
+
+title=''
+cly_title() {  # TEXT WIDTH → title
+    cly_json_unescape "${1:0:$(( $2 + 40 ))}"
+    title=${jv:0:$2}
+}
+
+# The table. Title last, so a wide character in it misaligns nothing.
+cly_print_sessions() {
+    local cols=${COLUMNS:-100} wwhere=26 wtitle i n
+    n=${#ses_rows[@]}
+    [ "$cols" -ge 60 ] || cols=60
+    wtitle=$(( cols - 3 - 2 - 8 - 2 - 8 - 2 - wwhere - 2 ))
+    printf '  %3s  %-8s  %-8s  %-*s  %s\n' '#' agent last "$wwhere" where title
+    for ((i = 0; i < n; i++)); do
+        cly_row_fields "${ses_rows[i]}"
+        cly_age "$row_epoch"
+        cly_where "$row_cwd" "$wwhere"
+        cly_title "$row_title" "$wtitle"
+        printf '  %3s  %-8s  %-8s  %-*s  %s\n' $(( i + 1 )) "$row_kind" "$age" "$wwhere" "${where:-?}" "$title"
+    done
 }
 
 # --- help --------------------------------------------------------------------
@@ -314,18 +871,20 @@ cly_profiles_line() {  # DEFAULT-NAME
     printf '%s\n' "$out"
 }
 
-# Tier 0: what a bare `cly` prints. One screen, the commands, and where to
-# look next. It never launches anything, because with no first word there is
-# nothing it could launch without guessing.
+# Tier 0: what a bare `cly` prints when there is no terminal to offer the menu
+# at. One screen, the commands, and where to look next.
 cly_brief() {
     local d
     cly_emit <<'EOF'
-cly — launch an agent CLI from a directory you pin once
+cly — one command in front of every coding agent
 
-usage: cly [OPTION...] <PROFILE|.> [AGENT-ARG...]
+usage: cly [OPTION...] [PROFILE|.] [AGENT-ARG...]
 
+  cly              pick an agent from a menu (needs a terminal)
   cly .            launch the default profile
   cly NAME         launch the profile called NAME
+  cly -r           pick a session of any agent and resume it
+  cly -x NAME      launch it with its permission prompts skipped
   cly init [NAME]  set up a profile
   cly config       show what is configured
 EOF
@@ -342,21 +901,25 @@ EOF
 
 cly_help() {
     cly_emit <<'EOF'
-cly — launch an agent CLI from a directory you pin once
+cly — one command in front of every coding agent
 
-usage: cly [OPTION...] <PROFILE|.> [AGENT-ARG...]
+usage: cly [OPTION...] [PROFILE|.] [AGENT-ARG...]
        cly init [NAME] | cly config | cly help | cly version
 
 A profile is a name with an executable, flags and a launch directory of its
 own. The first word is always cly's, and everything after the profile name is
-always the agent's, so neither can ever claim the other's flags.
+always the agent's, so neither can ever claim the other's flags. With no
+profile named, cly offers a menu of the agents it knows.
 
 EXAMPLES
+  $ cly                       pick an agent from the menu, then launch it
   $ cly .                     launch the default profile
-  $ cly . --resume            the same, and --resume reaches the agent
-  $ cly codex                 launch the profile called codex
+  $ cly -x .                  the same, with its permission prompts skipped
+  $ cly -r                    pick a session of any agent, resume it there
+  $ cly -x -r codex           resume a codex session, prompts skipped
+  $ cly claude --model opus   launch claude; --model opus reaches the agent
   $ cly --dir ~/work codex    launch it somewhere else, this call only
-  $ cly init codex            set that profile up, or change it
+  $ cly init deepseek         set that profile up, or change it
 
 COMMANDS
   init [NAME]  set up a profile; with no NAME, the one `cly .` launches
@@ -365,10 +928,14 @@ COMMANDS
   version      show the version
 
 OPTIONS
-  -d, --dir DIR  launch from DIR, this call only
-      --here     launch from the current directory, this call only
-  -h, --help     show this help
-  -V, --version  show the version
+  -x, --bypass    skip the agent's permission prompts, with its own flag
+  -r, --resume    list every agent's sessions, newest first, and resume the
+                  one picked; with a PROFILE, only that agent's
+  -c, --continue  resume the newest session without asking
+  -d, --dir DIR   launch from DIR, this call only
+      --here      launch from the current directory, this call only
+  -h, --help      show this help
+  -V, --version   show the version
 
   Options come before the profile name. `cly --help` is cly's help; `cly NAME
   --help` is the agent's, because after the name nothing is read by cly.
@@ -376,8 +943,8 @@ OPTIONS
 ARGUMENTS
   PROFILE  a configured name, or `.` for the default. Letters, digits, dash
            and underscore only. A name with no profile yet is offered for
-           setup when there is a terminal to ask at and a program of that
-           name on your PATH; otherwise it is an error that says so.
+           setup when there is a terminal to ask at and cly knows how to run
+           it; otherwise it is an error that says what to install.
 
            Every config line but the name itself is optional:
 
@@ -385,20 +952,40 @@ ARGUMENTS
              profile.codex.bin=codex       the executable  (default: the name)
              profile.codex.flags=--search  its flags       (default: none)
              profile.codex.dir=none        where to launch (default: here)
+             profile.codex.kind=codex      which agent, for -x and -r
+                                           (default: the executable's name)
+             profile.codex.env=A=1 B=$B    environment set first; $B is read
+                                           from yours
+
+AGENTS
+  claude codex gemini kimi  kinds -x knows the flag of and -r reads the
+                            sessions of
+  qwen opencode             kinds -x knows the flag of; their sessions are
+                            in shapes cly cannot read, so -r skips them
+  deepseek meta             routes: Claude Code through Ollama, set up from
+                            the menu or by `cly init NAME`
+
+  A session is resumed in the directory it was started in, by the profile of
+  its kind, or by the bare agent when no profile has that kind.
 
 ENVIRONMENT
   CLY_DIR     launch directory, overriding the profile
   CLY_FLAGS   flags, overriding the profile; empty means none
   CLY_BIN     the executable, overriding the profile
   CLY_CONFIG  config file location (default: ~/.config/cly/config)
+  CLY_ROWS    how many sessions -r lists (default: 30)
 
 FILES
-  ~/.config/cly/config   the profiles, and which one the default is
+  ~/.config/cly/config      the profiles, and which one the default is
+  ~/.claude/history.jsonl   Claude Code's prompt log, read for -r
+  ~/.codex/history.jsonl    Codex's, with ~/.codex/session_index.jsonl
+  ~/.gemini/tmp/*/chats/    Gemini CLI's sessions, with ~/.gemini/projects.json
+  ~/.kimi-code/sessions/    Kimi Code's, with its session_index.jsonl
 
 EXIT STATUS
   0  the agent was launched, or a command did its work
   1  the config file could not be read or written
-  2  a usage error, or a profile that could not be set up
+  2  a usage error, nothing picked, or a profile that could not be set up
 
 SEE ALSO
   https://github.com/BlueRaddish/cly
@@ -433,19 +1020,18 @@ cly_name_error() {  # NAME
 # How a configured directory reads at a prompt.
 cly_dir_label() {  # DIR
     case $1 in
-        ''|none|NONE) printf 'here
-' ;;
-        *) printf '%s
-' "$1" ;;
+        ''|none|NONE) printf 'here\n' ;;
+        *) printf '%s\n' "$1" ;;
     esac
 }
 
 # Ask what a profile is made of and write it. $1 is the name; $2, if given, is
 # printed first to say why the question is being asked at all. The caller loads
 # the profile first, so an existing one is *changed* here rather than replaced:
-# every question offers what is there now, and Enter keeps it.
+# every question offers what is there now, and Enter keeps it. A name from the
+# catalog that has no profile yet starts from the catalog's answers.
 cly_setup_profile() {  # NAME [WHY]
-    local name=$1 why=${2:-} bin reply flags dir dbin dflags ddir
+    local name=$1 why=${2:-} bin reply flags dir dbin dflags ddir kind=''
 
     cly_is_valid_name "$name" || { cly_name_error "$name"; return 2; }
 
@@ -455,11 +1041,15 @@ cly_setup_profile() {  # NAME [WHY]
         dbin=${prof_bin:-$name}
         dflags=$prof_flags
         ddir=$prof_dir
+    elif cly_catalog_info "$name"; then
+        dbin=$cat_bin
+        dflags=$cat_flags
+        ddir=''
+        [ "$cat_kind" = "$(cly_basename "$cat_bin")" ] || kind=$cat_kind
     else
         dbin=$name
         dflags=''
         ddir=''
-        case $name in claude) dflags=$CLY_CLAUDE_FLAGS ;; esac
     fi
 
     if [ "$dbin" = "$name" ] && command -v "$name" >/dev/null 2>&1; then
@@ -469,7 +1059,7 @@ cly_setup_profile() {  # NAME [WHY]
         if command -v "$dbin" >/dev/null 2>&1 || [ -x "$dbin" ]; then
             echo "  Enter a command or a path."
         else
-            echo "  Enter a command or a path; there is no '$name' on your PATH."
+            echo "  Enter a command or a path; there is no '$dbin' on your PATH."
         fi
         printf '  [%s] > ' "$dbin"
         IFS= read -r reply || { cly_no_answer; return 2; }
@@ -487,11 +1077,15 @@ cly_setup_profile() {  # NAME [WHY]
                     return 2 ;;
             esac
         fi
+        # A kind from the catalog only holds while the executable is the one
+        # it was written for.
+        [ "$bin" = "$dbin" ] || kind=''
         echo
     fi
 
     echo "  Which flags should $name be given on every launch?"
     echo "  Enter flags, 'none' for no flags, or press Enter to keep the default."
+    echo "  (Skipping permission prompts is not a flag to put here: that is 'cly -x'.)"
     printf '  [%s] > ' "${dflags:-none}"
     IFS= read -r reply || { cly_no_answer; return 2; }
     flags=${reply:-$dflags}
@@ -529,8 +1123,9 @@ cly_setup_profile() {  # NAME [WHY]
         dir=$(cd "$dir" && pwd) || return 2
     fi
 
-    cly_config_put_profile "$name" "$bin" "$flags" "${dir:-none}" || return 1
+    cly_config_put_profile "$name" "$bin" "$flags" "${dir:-none}" "$kind" || return 1
     echo "cly: profile $name  $bin ${flags:-(no flags)}"
+    [ -n "$kind" ] && echo "cly: counts as      $kind, for -x and -r"
     echo "cly: launches in    ${dir:-wherever you are standing}"
     echo "cly: stored in      $(cly_config_path)"
 }
@@ -538,7 +1133,7 @@ cly_setup_profile() {  # NAME [WHY]
 # Read the file with one profile in mind. Cheap enough to do per profile, and
 # it keeps every caller reading the same globals.
 cly_load_profile() {  # NAME
-    prof_bin=''; prof_flags=''; prof_dir=''
+    prof_bin=''; prof_flags=''; prof_dir=''; prof_kind=''; prof_env=''
     prof_has_section=0; prof_has_flags=0; prof_has_dir=0
     cfg_exists=0; cfg_default=''; cfg_profiles=''; cfg_real_profiles=''
     cfg_legacy=0; cfg_legacy_dir=''; cfg_legacy_flags=''; cfg_legacy_has_flags=0
@@ -552,6 +1147,8 @@ cly_load_profile() {  # NAME
 res_bin=''
 res_flags=''
 res_dir=''
+res_kind=''
+res_env=''
 cly_resolve() {  # NAME
     local name=$1
     if [ -n "${CLY_BIN:-}" ]; then res_bin=$CLY_BIN
@@ -567,6 +1164,44 @@ cly_resolve() {  # NAME
     elif [ "$prof_has_dir" = 1 ]; then res_dir=$(cly_config_dir "$prof_dir")
     else res_dir=''
     fi
+    # The kind follows the executable the profile names, not CLY_BIN: the
+    # suite points CLY_BIN at a stub, and the stub still stands in for claude.
+    if [ -n "$prof_kind" ]; then res_kind=$prof_kind
+    else res_kind=$(cly_basename "${prof_bin:-$name}")
+    fi
+    res_env=$prof_env
+}
+
+# --- launching ---------------------------------------------------------------
+
+# Everything a launch and a resume have in common: the environment, then exec.
+# FLAGS is deliberately unquoted where it is used: it is a list of arguments.
+cly_exec() {  # BIN FLAGS ENV ARG...
+    local bin=$1 flags=$2 env=$3 kv k v n
+    shift 3
+    # shellcheck disable=SC2086
+    for kv in $env; do
+        k=${kv%%=*}; v=${kv#*=}
+        case $v in
+            '$'[A-Za-z_]*) n=${v#\$}; n=${n%%[!A-Za-z0-9_]*}; v=${!n:-} ;;
+        esac
+        export "$k=$v"
+    done
+    # shellcheck disable=SC2086
+    exec "$bin" $flags "$@"
+}
+
+# The one flag -x adds — nothing, when the profile's standing flags already
+# carry it. An unknown kind has no flag cly could know.
+cly_bypass_flag() {  # PROFILE KIND
+    if ! cly_kind_info "$2" || [ -z "$kind_bypass" ]; then
+        echo "cly: -x needs to know $1's flag for skipping prompts, and its kind is '$2'" >&2
+        echo "cly: known kinds: $CLY_KINDS — set profile.$1.kind=KIND in the config," >&2
+        echo "cly: or put the flag in profile.$1.flags= and launch without -x" >&2
+        return 2
+    fi
+    case " $res_flags " in *" $kind_bypass "*) return 0 ;; esac
+    printf '%s\n' "$kind_bypass"
 }
 
 # --- commands ----------------------------------------------------------------
@@ -592,7 +1227,7 @@ cly_cmd_init() {  # [NAME]
     echo "cly: setting up the profile that 'cly .' launches."
     echo
     echo "  Which tool should 'cly .' launch?"
-    echo "  Enter a name — claude, codex, gemini, whatever you run."
+    echo "  Enter a name — claude, codex, gemini, kimi, whatever you run."
     printf '  [%s] > ' "${cfg_default:-claude}"
     IFS= read -r reply || { cly_no_answer; return 2; }
     name=${reply:-${cfg_default:-claude}}
@@ -645,13 +1280,19 @@ cly_cmd_config() {  # [NAME]
         [ "${CLY_FLAGS+set}" = set ] && echo "              from CLY_FLAGS, overriding the profile"
         echo "  launches in ${res_dir:-(wherever you are standing)}"
         [ -n "${CLY_DIR:-}" ] && echo "              from CLY_DIR, overriding the profile"
+        if cly_kind_info "$res_kind"; then
+            echo "  kind        $res_kind — -x adds $kind_bypass"
+        else
+            echo "  kind        $res_kind — not one cly knows, so -x and -r cannot serve it"
+        fi
+        [ -n "$res_env" ] && echo "  environment $res_env"
     done
     return 0
 }
 
 # --- errors ------------------------------------------------------------------
 
-cly_usage() { echo "usage: cly [OPTION...] <PROFILE|.> [AGENT-ARG...]" >&2; }
+cly_usage() { echo "usage: cly [OPTION...] [PROFILE|.] [AGENT-ARG...]" >&2; }
 
 cly_usage_error() {  # MESSAGE
     echo "cly: $1" >&2
@@ -667,13 +1308,156 @@ cly_unknown_option() {  # ARG...
 cly_no_profile_error() {  # NAME
     echo "cly: no profile named '$1'" >&2
     echo "cly: profiles: ${cfg_profiles:-(none configured)}" >&2
+    if cly_catalog_info "$1" && ! command -v "$cat_bin" >/dev/null 2>&1; then
+        echo "cly: $cat_label needs: $cat_install" >&2
+        echo "cly: then sign in:    $cat_login" >&2
+    fi
     echo "cly: run 'cly init $1' in a terminal to set one up" >&2
+}
+
+# --- the menu ----------------------------------------------------------------
+
+# One line per agent: the configured profiles first, in the order the config
+# lists them, then every catalog entry without a profile — installed ones can
+# be set up on the spot, the rest say how to get them. Sets menu_names[] and
+# menu_lines[] side by side.
+menu_names=()
+menu_lines=()
+cly_menu_build() {  # DEFAULT-NAME
+    local d=$1 n label where state line
+    menu_names=(); menu_lines=()
+    # shellcheck disable=SC2086
+    for n in $cfg_profiles; do
+        cly_load_profile "$n"
+        cly_resolve "$n"
+        if cly_kind_info "$res_kind"; then label=$kind_label; else label=$res_bin; fi
+        where=''
+        [ -z "$res_dir" ] || cly_where "$res_dir" 40
+        [ "$n" = "$d" ] && where="${where:-here}  (default)"
+        menu_names+=("$n")
+        printf -v line '%-9s %-12s %s' "$n" "$label" "${where:-here}"
+        menu_lines+=("$line")
+    done
+    for n in $CLY_CATALOG; do
+        case " $cfg_profiles " in *" $n "*) continue ;; esac
+        cly_catalog_info "$n"
+        if command -v "$cat_bin" >/dev/null 2>&1; then
+            if [ "$cat_bin" = "$n" ]; then state='installed, no profile yet'
+            else state="through $cat_bin, no profile yet"; fi
+        else
+            state="not installed: $cat_install"
+        fi
+        menu_names+=("$n")
+        printf -v line '%-9s %-12s %s' "$n" "$cat_label" "$state"
+        menu_lines+=("$line")
+    done
+}
+
+# Show the menu, read an answer, print the name chosen. A number or a name;
+# Enter takes the default profile when there is one.
+cly_menu_pick() {  # DEFAULT-NAME
+    local d=$1 i n reply
+    n=${#menu_names[@]}
+    echo "cly $CLY_VERSION — which agent?"
+    echo
+    for ((i = 0; i < n; i++)); do
+        printf '  %2s  %s\n' $(( i + 1 )) "${menu_lines[i]}"
+    done
+    echo
+    if [ -n "$d" ]; then printf '  number or name [%s] > ' "$d"
+    else printf '  number or name > '; fi
+    IFS= read -r reply || { echo >&2; echo "cly: nothing picked" >&2; return 2; }
+    reply=${reply%$'\r'}
+    case $reply in
+        '') [ -n "$d" ] || { echo "cly: nothing picked" >&2; return 2; }
+            printf '%s\n' "$d"; return 0 ;;
+        q|Q|quit) echo "cly: nothing picked" >&2; return 2 ;;
+        *[!0-9]*)
+            for ((i = 0; i < n; i++)); do
+                [ "${menu_names[i]}" = "$reply" ] && { printf '%s\n' "$reply"; return 0; }
+            done
+            echo "cly: '$reply' is not on the menu" >&2; return 2 ;;
+        *)  if [ "$reply" -ge 1 ] && [ "$reply" -le "$n" ]; then
+                printf '%s\n' "${menu_names[reply - 1]}"; return 0
+            fi
+            echo "cly: '$reply' is not on the menu" >&2; return 2 ;;
+    esac
+}
+
+# --- resuming ----------------------------------------------------------------
+
+# List the sessions, read a number, and hand the row back in row_*.
+# $1 narrows to one kind; $2 = 1 takes the newest without asking.
+cly_pick_session() {  # [KIND] [NO-ASK]
+    local kind=${1:-} noask=${2:-0} n reply rows i
+    rows=${CLY_ROWS:-30}
+    case $rows in ''|*[!0-9]*|0) rows=30 ;; esac
+    cly_sessions_all "$kind"
+    n=${#ses_rows[@]}
+    if [ "$n" = 0 ]; then
+        echo "cly: no sessions found${kind:+ for $kind}" >&2
+        return 2
+    fi
+    if [ "$noask" = 1 ]; then
+        cly_top_rows 1
+        cly_row_fields "${ses_rows[0]}"
+        if [ -z "$row_cwd" ]; then cly_session_cwd "$row_kind" "$row_id"; row_cwd=$jv; fi
+        return 0
+    fi
+    cly_top_rows "$rows"
+    [ "$rows" -lt "$n" ] || rows=$n
+    for ((i = 0; i < rows; i++)); do
+        cly_row_fields "${ses_rows[i]}"
+        [ -n "$row_cwd" ] && continue
+        cly_session_cwd "$row_kind" "$row_id"; row_cwd=$jv
+        ses_rows[i]="$row_epoch$CLY_US$row_kind$CLY_US$row_id$CLY_US$row_cwd$CLY_US$row_title"
+    done
+    ses_rows=("${ses_rows[@]:0:$rows}")
+    echo "cly $CLY_VERSION — which session?${kind:+  ($kind only)}"
+    echo
+    cly_print_sessions
+    echo
+    if [ "$rows" -lt "$n" ]; then
+        echo "  $rows of $n shown; CLY_ROWS=$(( rows * 2 )) shows more, 'cly -r NAME' narrows to one agent"
+        echo
+    fi
+    if ! cly_is_interactive; then
+        echo "cly: no terminal to pick at — run this in one, or 'cly NAME' with the agent's own resume flag" >&2
+        return 2
+    fi
+    printf '  number [1] > '
+    IFS= read -r reply || { echo >&2; echo "cly: nothing picked" >&2; return 2; }
+    reply=${reply%$'\r'}
+    case $reply in
+        '') reply=1 ;;
+        q|Q|quit) echo "cly: nothing picked" >&2; return 2 ;;
+        *[!0-9]*) echo "cly: '$reply' is not a row" >&2; return 2 ;;
+    esac
+    if [ "$reply" -lt 1 ] || [ "$reply" -gt "$rows" ]; then
+        echo "cly: '$reply' is not a row" >&2; return 2
+    fi
+    cly_row_fields "${ses_rows[reply - 1]}"
+}
+
+# The first profile of a kind, the default first. Empty when there is none.
+cly_profile_of_kind() {  # KIND
+    local d n
+    d=$(cly_default_profile) || d=''
+    # shellcheck disable=SC2086
+    for n in ${d:+$d} $cfg_profiles; do
+        cly_load_profile "$n"
+        [ "$prof_has_section" = 1 ] || continue
+        cly_resolve "$n"
+        [ "$res_kind" = "$1" ] && { printf '%s\n' "$n"; return 0; }
+    done
+    return 1
 }
 
 # --- main --------------------------------------------------------------------
 
 cly_main() {
-    local name='' target='' dir='' opt_dir='' opt_here=0 rc=0 dir_explicit=0
+    local name='' target='' dir='' opt_dir='' opt_here=0 opt_x=0 opt_r=0 opt_c=0
+    local rc=0 dir_explicit=0 bypass='' filter='' cwd=''
     local -a agent=()
 
     # cly's own options, and only before the profile name. Everything after the
@@ -687,6 +1471,9 @@ cly_main() {
                 fi
                 opt_dir=$2; shift 2 ;;
             --here)       opt_here=1; shift ;;
+            -x|--bypass)  opt_x=1; shift ;;
+            -r|--resume)  opt_r=1; shift ;;
+            -c|--continue) opt_r=1; opt_c=1; shift ;;
             -h|--help)    cly_help; return 0 ;;
             -V|--version) echo "cly $CLY_VERSION"; return 0 ;;
             -*)           cly_unknown_option "$@"; return 2 ;;
@@ -694,15 +1481,10 @@ cly_main() {
         esac
     done
 
-    # No first word: there is nothing to launch that would not be a guess.
-    if [ $# -eq 0 ]; then
-        cly_load_profile ''
-        cly_brief
-        return 0
+    if [ $# -gt 0 ]; then
+        name=$1; shift
+        agent=(); [ $# -gt 0 ] && agent=("$@")
     fi
-
-    name=$1; shift
-    agent=(); [ $# -gt 0 ] && agent=("$@")
 
     case $name in
         help)    cly_help; return 0 ;;
@@ -722,6 +1504,86 @@ cly_main() {
     esac
 
     cly_load_profile ''
+
+    # -r: the sessions of every agent, or of the named profile's kind. The
+    # profile that reopens one is the one named, else the first of that kind,
+    # else the bare agent.
+    if [ "$opt_r" = 1 ]; then
+        if [ "$name" = . ]; then
+            name=$(cly_default_profile) || {
+                echo "cly: no default profile to narrow -r to" >&2; return 2; }
+        fi
+        if [ -n "$name" ]; then
+            cly_load_profile "$name"
+            if [ "$prof_has_section" = 1 ]; then
+                cly_resolve "$name"; filter=$res_kind
+            elif cly_is_kind "$name"; then
+                filter=$name
+            else
+                cly_no_profile_error "$name"; return 2
+            fi
+            if ! cly_is_listable "$filter"; then
+                echo "cly: $name is of kind '$filter', whose sessions cly cannot read" >&2
+                echo "cly: -r lists: $CLY_LISTABLE" >&2
+                return 2
+            fi
+        fi
+        cly_pick_session "$filter" "$opt_c" || return $?
+        cwd=$row_cwd
+        # The profile named, if it is one; else the first of the row's kind.
+        [ -n "$name" ] && cly_load_profile "$name"
+        if [ -z "$name" ] || [ "$prof_has_section" = 0 ]; then
+            name=$(cly_profile_of_kind "$row_kind") || name=''
+        fi
+        if [ -n "$name" ]; then
+            cly_load_profile "$name"
+            cly_resolve "$name"
+        else
+            # No profile of that kind: the agent itself, with no standing flags.
+            cly_load_profile "$row_kind"
+            prof_bin=$row_kind; prof_flags=''; prof_has_flags=1; prof_kind=$row_kind
+            cly_resolve "$row_kind"
+            if ! command -v "$res_bin" >/dev/null 2>&1; then
+                echo "cly: that session is $row_kind's, and there is no $row_kind on your PATH" >&2
+                return 2
+            fi
+            name=$row_kind
+        fi
+        cly_kind_info "$row_kind"
+        if [ "$opt_x" = 1 ]; then
+            bypass=$(cly_bypass_flag "$name" "$res_kind") || return $?
+        fi
+        if [ "$opt_here" = 1 ]; then
+            dir=''
+        elif [ -n "$opt_dir" ]; then
+            dir=$(cly_to_posix "$(cly_expand_tilde "$opt_dir")")
+            [ -d "$dir" ] || { echo "cly: $dir does not exist" >&2; return 2; }
+        else
+            dir=${cwd:+$(cly_to_posix "$cwd")}
+            if [ -n "$dir" ] && [ ! -d "$dir" ]; then
+                echo "cly: the session's directory $dir is gone — resuming in $PWD instead" >&2
+                dir=''
+            fi
+        fi
+        [ -n "$dir" ] && { cd "$dir" || return 1; }
+        echo "cly: resuming $row_kind session ${row_id:0:8} in ${dir:-$PWD}" >&2
+        # shellcheck disable=SC2086
+        cly_exec "$res_bin" "$res_flags" "$res_env" ${bypass:+"$bypass"} $kind_resume "$row_id" ${agent[@]+"${agent[@]}"}
+    fi
+
+    # No first word: the menu, when there is a terminal to show it at; the
+    # brief otherwise, since nothing could be launched without guessing.
+    if [ -z "$name" ]; then
+        if ! cly_is_interactive; then
+            cly_brief
+            return 0
+        fi
+        target=$(cly_default_profile) || target=''
+        cly_menu_build "$target"
+        cly_load_profile ''
+        name=$(cly_menu_pick "$target") || return $?
+        echo
+    fi
 
     # `.` is whichever profile the config says, or the only one there is.
     if [ "$name" = . ]; then
@@ -755,14 +1617,22 @@ cly_main() {
             cly_no_profile_error "$name"
             return 2
         fi
-        if ! command -v "$name" >/dev/null 2>&1; then
+        if cly_catalog_info "$name"; then
+            if ! command -v "$cat_bin" >/dev/null 2>&1; then
+                echo "cly: no profile named '$name', and no '$cat_bin' on your PATH" >&2
+                echo "cly: $cat_label needs: $cat_install" >&2
+                echo "cly: then sign in:    $cat_login" >&2
+                echo "cly: after that, 'cly $name' again sets the profile up" >&2
+                return 2
+            fi
+        elif ! command -v "$name" >/dev/null 2>&1; then
             echo "cly: no profile named '$name', and no '$name' on your PATH" >&2
             echo "cly: profiles: ${cfg_profiles:-(none configured)}" >&2
             echo "cly: run 'cly init $name' to make one anyway" >&2
             return 2
         fi
         cly_pin_implicit_default "$name" || return 1
-        cly_setup_profile "$name" "cly: no $name profile yet — $name is on your PATH." || return $?
+        cly_setup_profile "$name" "cly: no $name profile yet — ${cat_bin:-$name} is on your PATH." || return $?
         if [ -z "$cfg_default" ] && [ -z "$cfg_profiles" ]; then
             cly_config_put_default "$name" || return 1
             echo "cly: 'cly .' now launches $name"
@@ -772,6 +1642,10 @@ cly_main() {
     fi
 
     cly_resolve "$name"
+
+    if [ "$opt_x" = 1 ]; then
+        bypass=$(cly_bypass_flag "$name" "$res_kind") || return $?
+    fi
 
     dir=$res_dir
     dir_explicit=0
@@ -800,9 +1674,7 @@ cly_main() {
 
     [ -n "$dir" ] && { cd "$dir" || return 1; }
 
-    # $res_flags is deliberately unquoted: it is a list of arguments, not one.
-    # shellcheck disable=SC2086
-    exec "$res_bin" $res_flags ${agent[@]+"${agent[@]}"}
+    cly_exec "$res_bin" "$res_flags" "$res_env" ${bypass:+"$bypass"} ${agent[@]+"${agent[@]}"}
 }
 
 cly_main "$@"
