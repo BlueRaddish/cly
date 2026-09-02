@@ -20,9 +20,16 @@ cat > "$stub" <<'EOF'
 #!/usr/bin/env bash
 printf 'PWD=%s\n' "$(pwd)"
 for a in "$@"; do printf 'ARG=%s\n' "$a"; done
+for v in "${!CLY_T_@}"; do printf 'ENV %s=%s' "$v" "${!v}"; echo; done
 EOF
 chmod +x "$stub"
 export CLY_BIN="$stub"
+
+# The agents' session stores, faked under the scratch directory: the real
+# ~/.claude, ~/.codex, ~/.gemini and ~/.kimi-code are unreachable from here.
+stores="$work/stores"
+export CLAUDE_CONFIG_DIR="$stores/claude" CODEX_HOME="$stores/codex"
+export GEMINI_CLI_HOME="$stores/gemini" KIMI_CODE_HOME="$stores/kimi"
 
 # cly asks one more question when the tool being set up is not on PATH, so a
 # suite that reads PATH is a suite whose piped answers land in different
@@ -87,8 +94,8 @@ other="$work/other";   mkdir -p "$other"
 reset_config
 out=$(run); rc=$?
 eq   'bare cly exits 0' 0 "$rc"
-has  'bare cly names the tool' 'cly — launch an agent CLI' "$out"
-has  'bare cly shows the usage line' 'usage: cly [OPTION...] <PROFILE|.>' "$out"
+has  'bare cly names the tool' 'cly — one command in front of every coding agent' "$out"
+has  'bare cly shows the usage line' 'usage: cly [OPTION...] [PROFILE|.]' "$out"
 has  'bare cly points at the default' 'cly .' "$out"
 has  'bare cly points at the full help' "Run 'cly help' for more." "$out"
 has  'bare cly says when nothing is configured' 'No profiles yet' "$out"
@@ -116,7 +123,7 @@ long=$(printf '%s\n' "$out" | awk 'length > 95 { c++ } END { print c + 0 }')
 eq   'help wraps under 95 columns' 0 "$long"
 
 ver=$(run version)
-has  'version prints a version' 'cly 3.' "$ver"
+has  'version prints a version' 'cly 4.' "$ver"
 eq   '--version agrees' "$ver" "$(run --version)"
 eq   '-V agrees' "$ver" "$(run -V)"
 
@@ -164,10 +171,10 @@ has  'after the name --help belongs to the agent' 'ARG=--help' "$out"
 out=$(run one .)
 has  'after the name a dot belongs to the agent' 'ARG=.' "$out"
 
-out=$(run --resume); rc=$?
+out=$(run --frobnicate); rc=$?
 eq   'an option before the name that cly does not know exits 2' 2 "$rc"
 has  'it says whose options go where' "options come before the profile name" "$(err)"
-has  'it suggests the fix' 'cly . --resume' "$(err)"
+has  'it suggests the fix' 'cly . --frobnicate' "$(err)"
 
 # --- options and the environment ----------------------------------------------
 
@@ -263,7 +270,8 @@ reset_config
 out=$(ask '
 none
 ' init claude)
-has  'claude is offered the standing flags' '--remote-control --dangerously-skip-permissions' "$out"
+has  'claude is offered the standing flags' '[--remote-control] >' "$out"
+hasnt 'but not the bypass, which is -x now' 'dangerously' "$out"
 out=$(ask '
 none
 ' init codex)
@@ -541,6 +549,324 @@ write_config 'default=one' "profile.one.bin=$stub" "profile.one.dir=$work/gone"
 out=$(run one)
 has  'but a configured directory that vanished still launches here' "PWD=$here" "$out"
 has  'and warns' 'does not exist' "$(err)"
+
+# --- kinds, -x and env= ---------------------------------------------------------
+
+# The stub stands in for every agent, so the kind comes from the config.
+write_config 'default=one' "profile.one.bin=$stub" 'profile.one.flags=--standing' 'profile.one.kind=claude'
+out=$(run -x .)
+has  "-x adds the kind's flag" 'ARG=--dangerously-skip-permissions' "$out"
+args=$(printf '%s\n' "$out" | grep '^ARG=' | tr '\n' ' ')
+eq   'after the standing flags' 'ARG=--standing ARG=--dangerously-skip-permissions ' "$args"
+out=$(run -x . --model x)
+args=$(printf '%s\n' "$out" | grep '^ARG=' | tr '\n' ' ')
+eq   "and before the agent's" 'ARG=--standing ARG=--dangerously-skip-permissions ARG=--model ARG=x ' "$args"
+out=$(run --bypass .)
+has  '--bypass is -x' 'ARG=--dangerously-skip-permissions' "$out"
+out=$(run .)
+hasnt 'without -x the flag is not there' 'dangerously' "$out"
+
+for k in claude:--dangerously-skip-permissions codex:--dangerously-bypass-approvals-and-sandbox \
+         gemini:--yolo kimi:--yolo qwen:--yolo opencode:--auto; do
+    write_config 'default=k' "profile.k.bin=$stub" "profile.k.kind=${k%%:*}"
+    out=$(run -x .)
+    has  "-x on kind ${k%%:*} adds ${k#*:}" "ARG=${k#*:}" "$out"
+done
+
+# The kind defaults to the executable's name, so a profile that names codex
+# needs no kind= line.
+write_config 'default=c' 'profile.c.bin=codex'
+out=$(run -x .)
+has  'the kind follows the executable' 'ARG=--dangerously-bypass-approvals-and-sandbox' "$out"
+write_config 'default=c' 'profile.c.bin=C:\tools\claude.exe'
+out=$(run -x .)
+has  'even through a Windows path' 'ARG=--dangerously-skip-permissions' "$out"
+
+write_config 'default=z' "profile.z.bin=$stub"
+out=$(run -x .); rc=$?
+eq   'a kind cly does not know refuses -x' 2 "$rc"
+hasnt 'and launches nothing' 'PWD=' "$out"
+has  'and names the config key' 'profile.z.kind=' "$(err)"
+
+write_config 'default=one' "profile.one.bin=$stub" 'profile.one.flags=--dangerously-skip-permissions' 'profile.one.kind=claude'
+out=$(run -x .)
+eq   'a flag already in flags= is not added twice' 1 "$(printf '%s\n' "$out" | grep -c dangerously)"
+
+# env= is exported before the launch; $NAME is read from the caller's environment.
+write_config 'default=one' "profile.one.bin=$stub" 'profile.one.env=CLY_T_A=1 CLY_T_B=$CLY_T_SRC'
+out=$(CLY_T_SRC=secret run .)
+has  'env= sets a variable' 'ENV CLY_T_A=1' "$out"
+has  'and reads $NAME from the environment' 'ENV CLY_T_B=secret' "$out"
+out=$(run .)
+has  'an unset $NAME is empty' 'ENV CLY_T_B=' "$out"
+
+# kind= and env= survive the setup questions, which never ask about them.
+write_config 'default=one' "profile.one.bin=$stub" 'profile.one.kind=claude' 'profile.one.env=CLY_T_A=1' '# a note'
+out=$(ask '
+none
+
+' init one)
+has  'cly init keeps kind=' 'profile.one.kind=claude' "$(config)"
+has  'cly init keeps env=' 'profile.one.env=CLY_T_A=1' "$(config)"
+has  'and the comment after them' '# a note' "$(config)"
+eq   'and writes the kind once' 1 "$(config | grep -c 'profile.one.kind=')"
+
+out=$(run config)
+has  'config shows the kind' 'kind        claude — -x adds --dangerously-skip-permissions' "$out"
+has  'config shows the environment' 'environment CLY_T_A=1' "$out"
+write_config 'default=z' "profile.z.bin=$stub"
+out=$(run config)
+has  'config says when -x cannot serve a kind' 'not one cly knows' "$out"
+
+# --- the menu ---------------------------------------------------------------------
+
+write_config 'default=a' "profile.a.bin=$stub" 'profile.a.flags=--aa' 'profile.a.kind=claude' \
+             "profile.b.bin=$stub" 'profile.b.flags=--bb' 'profile.b.kind=codex'
+out=$(run)
+has  'without a terminal a bare cly is still the brief' "Run 'cly help' for more" "$out"
+hasnt 'and launches nothing' 'PWD=' "$out"
+
+out=$(ask '
+')
+has  'with one, it is the menu' 'which agent?' "$out"
+has  'the profiles come first' '   1  a         Claude Code' "$out"
+has  'the default is marked' '(default)' "$out"
+has  'the catalog follows' 'gemini    Gemini CLI   not installed: npm install -g @google/gemini-cli' "$out"
+has  'installed tools without a profile say so' 'claude    Claude Code  installed, no profile yet' "$out"
+has  'Enter launches the default' 'ARG=--aa' "$out"
+out=$(ask '2
+')
+has  'a number launches that row' 'ARG=--bb' "$out"
+out=$(ask 'b
+')
+has  'a name launches that profile' 'ARG=--bb' "$out"
+out=$(ask 'q
+'); rc=$?
+eq   'q picks nothing' 2 "$rc"
+hasnt 'and launches nothing' 'PWD=' "$out"
+out=$(ask '99
+'); rc=$?
+eq   'a row that is not there exits 2' 2 "$rc"
+out=$(ask ''); rc=$?
+eq   'no answer at all exits 2' 2 "$rc"
+
+# Picking an installed tool that has no profile sets it up on the spot.
+out=$(ask 'claude
+none
+
+')
+has  'picking an unconfigured tool asks the setup questions' 'Which flags should claude' "$out"
+has  'then launches it' 'PWD=' "$out"
+has  'and the profile is now there' 'profile.claude.bin=claude' "$(config)"
+has  'the default did not move' 'default=a' "$(config)"
+
+# Picking one that is not installed prints how to get it.
+out=$(ask 'gemini
+'); rc=$?
+eq   'a tool that is not installed exits 2' 2 "$rc"
+has  'and says what to install' 'npm install -g @google/gemini-cli' "$(err)"
+has  'and how to sign in' 'Login with Google' "$(err)"
+out=$(ask 'deepseek
+'); rc=$?
+eq   'a route whose host is missing exits 2' 2 "$rc"
+has  'and names the host' 'ollama' "$(err)"
+
+# With ollama on the PATH, the DeepSeek route sets itself up with Claude Code's
+# kind, so -x and -r treat it as Claude Code.
+{ echo '#!/usr/bin/env bash'; echo 'true'; } > "$work/bin/ollama"
+chmod +x "$work/bin/ollama"
+out=$(ask 'deepseek
+
+
+
+')
+has  'the route offers ollama' '[ollama] >' "$out"
+has  'and its launch words' '[launch claude --model deepseek-v4-pro --] >' "$out"
+has  'and launches through them' 'ARG=launch' "$out"
+has  'and records the kind' 'profile.deepseek.kind=claude' "$(config)"
+out=$(run -x deepseek)
+args=$(printf '%s\n' "$out" | grep '^ARG=' | tr '\n' ' ')
+eq   '-x lands after the --, where Claude Code reads it' 'ARG=launch ARG=claude ARG=--model ARG=deepseek-v4-pro ARG=-- ARG=--dangerously-skip-permissions ' "$args"
+rm -f "$work/bin/ollama"
+
+# --- sessions -----------------------------------------------------------------
+
+# Four fake stores, one per kind, shaped as the agents write them. Timestamps
+# are relative to now so the age column can be checked.
+now=$(date +%s)
+iso() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ; }
+proja="$work/proj-a"; projb="$work/proj-b"
+mkdir -p "$proja" "$projb"
+
+c1=c1c1c1c1-0000-0000-0000-000000000001
+c2=c2c2c2c2-0000-0000-0000-000000000002
+c3=c3c3c3c3-0000-0000-0000-000000000003
+mkdir -p "$stores/claude/projects/${proja//[^A-Za-z0-9]/-}" "$stores/claude/projects/C--Users-me-proj"
+printf '%s\n' \
+  '{"display":"/effort","pastedContents":{},"timestamp":'$(( (now - 3600) * 1000 ))',"project":"'"$proja"'","sessionId":"'$c1'"}' \
+  '{"display":"Claude first \"real\" prompt\nline two","pastedContents":{},"timestamp":'$(( (now - 120) * 1000 ))',"project":"'"$proja"'","sessionId":"'$c1'"}' \
+  '{"display":"purged","pastedContents":{},"timestamp":'$(( (now - 60) * 1000 ))',"project":"'"$proja"'","sessionId":"'$c2'"}' \
+  '{"display":"On Windows","pastedContents":{},"timestamp":'$(( (now - 5 * 86400) * 1000 ))',"project":"C:\\Users\\me\\proj","sessionId":"'$c3'"}' \
+  > "$stores/claude/history.jsonl"
+echo '{}' > "$stores/claude/projects/${proja//[^A-Za-z0-9]/-}/$c1.jsonl"
+echo '{}' > "$stores/claude/projects/C--Users-me-proj/$c3.jsonl"
+
+x1=01a0aaaa-0000-7000-8000-000000000001
+x2=01a0bbbb-0000-7000-8000-000000000002
+mkdir -p "$stores/codex/sessions/2026/09/01"
+printf '%s\n' \
+  '{"session_id":"'$x1'","ts":'$(( now - 86400 ))',"text":"codex first prompt"}' \
+  '{"session_id":"'$x1'","ts":'$(( now - 80000 ))',"text":"codex later prompt"}' \
+  '{"session_id":"'$x2'","ts":'$(( now - 10 ))',"text":"no rollout any more"}' \
+  > "$stores/codex/history.jsonl"
+printf '%s\n' \
+  '{"id":"'$x1'","thread_name":"first name","updated_at":"x"}' \
+  '{"id":"'$x1'","thread_name":"named thread","updated_at":"x"}' \
+  > "$stores/codex/session_index.jsonl"
+printf '%s\n' '{"timestamp":"2026-09-01T00:00:00.000Z","type":"session_meta","payload":{"id":"'$x1'","timestamp":"2026-09-01T00:00:00.000Z","cwd":"'"$projb"'"}}' \
+  > "$stores/codex/sessions/2026/09/01/rollout-2026-09-01T00-00-00-$x1.jsonl"
+
+g1=g1g1g1g1-1111-2222-3333-444444444444
+g2=g2g2g2g2-1111-2222-3333-444444444444
+mkdir -p "$stores/gemini/tmp/proj-a/chats" "$stores/gemini/tmp/other/chats"
+printf '%s\n' \
+  '{"sessionId":"'$g1'","projectHash":"abc","startTime":"'$(iso $((now - 7200)))'","lastUpdated":"'$(iso $((now - 7000)))'","kind":"main"}' \
+  '{"id":"m1","timestamp":"x","type":"user","content":[{"text":"Gemini asks a question"}]}' \
+  > "$stores/gemini/tmp/proj-a/chats/session-2026-09-01T10-00-${g1:0:8}.jsonl"
+printf '%s\n' "$proja" > "$stores/gemini/tmp/proj-a/.project_root"
+printf '%s\n' '{"sessionId":"sub","kind":"subagent","lastUpdated":"'$(iso "$now")'"}' \
+  > "$stores/gemini/tmp/proj-a/chats/session-2026-09-01T11-00-subagent.jsonl"
+printf '%s\n' '{' '  "sessionId": "'$g2'",' '  "startTime": "2026-08-20T09:00:00.000Z",' \
+  '  "lastUpdated": "2026-08-20T09:45:00.000Z",' '  "messages": [' '    {' '      "type": "user",' \
+  '      "content": "Legacy gemini session"' '    }' '  ]' '}' \
+  > "$stores/gemini/tmp/other/chats/session-2026-08-20T09-00-${g2:0:8}.json"
+printf '%s\n' '{' '  "projects": {' '    "'"$projb"'": "other"' '  }' '}' > "$stores/gemini/projects.json"
+
+k1=11111111-aaaa-bbbb-cccc-000000000001
+k2=22222222-aaaa-bbbb-cccc-000000000002
+k3=33333333-aaaa-bbbb-cccc-000000000003
+for k in $k1 $k2 $k3; do mkdir -p "$stores/kimi/sessions/wd_proj_abc/$k"; done
+printf '%s\n' \
+  '{"sessionId":"'$k1'","sessionDir":"'"$stores/kimi/sessions/wd_proj_abc/$k1"'","workDir":"x"}' \
+  '{"sessionId":"'$k2'","sessionDir":"'"$stores/kimi/sessions/wd_proj_abc/$k2"'","workDir":"x"}' \
+  '{"sessionId":"'$k3'","sessionDir":"'"$stores/kimi/sessions/wd_proj_abc/$k3"'","workDir":"x"}' \
+  '{"sessionId":"'$k3'","deleted":true}' \
+  > "$stores/kimi/session_index.jsonl"
+printf '%s\n' '{' '  "title": "Kimi fixes the build",' '  "lastPrompt": "run the tests again",' \
+  '  "updatedAt": "'$(iso $((now - 3 * 86400)))'",' '  "archived": false,' '  "custom": {' \
+  '    "cwd": "'"$proja"'"' '  }' '}' > "$stores/kimi/sessions/wd_proj_abc/$k1/state.json"
+printf '%s\n' '{"lastPrompt":"archived","updatedAt":'$(( now * 1000 ))',"archived":true,"cwd":"'"$proja"'"}' \
+  > "$stores/kimi/sessions/wd_proj_abc/$k2/state.json"
+printf '%s\n' '{"lastPrompt":"deleted","updatedAt":'$(( now * 1000 ))',"archived":false,"cwd":"'"$proja"'"}' \
+  > "$stores/kimi/sessions/wd_proj_abc/$k3/state.json"
+
+write_config 'default=one' "profile.one.bin=$stub" 'profile.one.flags=--standing' 'profile.one.kind=claude' \
+             "profile.two.bin=$stub" 'profile.two.flags=--codexy' 'profile.two.kind=codex'
+out=$(COLUMNS=120 run -r); rc=$?
+eq   'without a terminal -r lists and exits 2' 2 "$rc"
+has  'and says so' 'no terminal to pick at' "$(err)"
+has  'the table has a header' '#  agent     last      where' "$out"
+rows=$(printf '%s\n' "$out" | grep -E '^ +[0-9]+  ')
+eq   'six sessions are listed' 6 "$(printf '%s\n' "$rows" | grep -c .)"
+has  'the newest is first' '1  claude    2m ago' "$out"
+has  'then the gemini session' '2  gemini    1h ago' "$out"
+has  'then codex' '3  codex     22h ago' "$out"
+has  'then kimi' '4  kimi      3d ago' "$out"
+has  'a title is the first prompt that was not a slash command' 'Claude first "real" prompt line two' "$out"
+hasnt 'a slash command is not a title' '/effort' "$out"
+hasnt 'a session whose transcript is gone is not offered' 'purged' "$out"
+hasnt 'a codex session without its rollout is not offered' 'no rollout' "$out"
+has  'a codex thread is shown by its latest name' 'named thread' "$out"
+hasnt 'not an older one' 'first name' "$out"
+has  'gemini reads the first user message' 'Gemini asks a question' "$out"
+has  'and the legacy one-object file' 'Legacy gemini session' "$out"
+hasnt 'a subagent transcript is not a session' 'subagent' "$out"
+has  'kimi shows the title' 'Kimi fixes the build' "$out"
+hasnt 'an archived kimi session is not offered' 'archived' "$out"
+hasnt 'nor a deleted one' 'deleted' "$out"
+has  'a Windows launch directory reads as a posix one' '/c/Users/me/proj' "$out"
+has  'a session older than a week shows its date' 'Aug 20' "$out"
+
+out=$(run -r two)
+eq   '-r NAME narrows to that kind' 1 "$(printf '%s\n' "$out" | grep -c 'named thread')"
+hasnt 'and shows nothing else' 'claude' "$(printf '%s\n' "$out" | grep -E '^ +[0-9]+  ')"
+out=$(run -r codex)
+has  'a bare kind narrows too' 'named thread' "$out"
+out=$(run -r nosuch); rc=$?
+eq   '-r with an unknown name exits 2' 2 "$rc"
+has  'and says so' "no profile named 'nosuch'" "$(err)"
+write_config 'default=oc' "profile.oc.bin=$stub" 'profile.oc.kind=opencode'
+out=$(run -r oc); rc=$?
+eq   '-r on a kind whose sessions cly cannot read exits 2' 2 "$rc"
+has  'and says which kinds it can' 'claude codex gemini kimi' "$(err)"
+out=$(CLY_ROWS=2 run -r)
+has  'CLY_ROWS caps the list' '2 of ' "$out"
+hasnt 'at that many rows' '   3  ' "$out"
+
+write_config 'default=one' "profile.one.bin=$stub" 'profile.one.flags=--standing' 'profile.one.kind=claude' \
+             "profile.two.bin=$stub" 'profile.two.flags=--codexy' 'profile.two.kind=codex'
+out=$(ask '
+' -r)
+has  'Enter resumes the newest' "ARG=$c1" "$out"
+has  'in its own directory' "PWD=$proja" "$out"
+args=$(printf '%s\n' "$out" | grep '^ARG=' | tr '\n' ' ')
+eq   'with the standing flags, then the resume words' "ARG=--standing ARG=--resume ARG=$c1 " "$args"
+has  'and says what it is doing' "resuming claude session ${c1:0:8} in $proja" "$(err)"
+out=$(ask '3
+' -r)
+has  'a number resumes that row' "ARG=$x1" "$out"
+has  'by the profile of its kind' 'ARG=--codexy' "$out"
+has  'with its own resume words' 'ARG=resume' "$out"
+has  'in the directory its rollout names' "PWD=$projb" "$out"
+out=$(ask '2
+' -r)
+args=$(printf '%s\n' "$out" | grep '^ARG=' | tr '\n' ' ')
+eq   'a kind with no profile resumes by the bare agent, no standing flags' "ARG=--resume ARG=$g1 " "$args"
+out=$(CLY_BIN='' ask '2
+' -r); rc=$?
+eq   'unless the agent is not on the PATH' 2 "$rc"
+has  'which it says' 'no gemini on your PATH' "$(err)"
+out=$(ask '4
+' -r)
+has  'kimi resumes with --session' 'ARG=--session' "$out"
+has  'in its working directory' "PWD=$proja" "$out"
+out=$(ask '5
+' -r)
+has  'a session whose directory is gone resumes here' "PWD=$here" "$out"
+has  'and warns' 'is gone' "$(err)"
+out=$(ask '6
+' -r)
+has  'the legacy gemini session finds its directory in projects.json' "PWD=$projb" "$out"
+out=$(ask '9
+' -r); rc=$?
+eq   'a row that is not there exits 2' 2 "$rc"
+out=$(ask 'q
+' -r); rc=$?
+eq   'q resumes nothing' 2 "$rc"
+hasnt 'and launches nothing' 'PWD=' "$out"
+
+out=$(run -c)
+has  '-c resumes the newest without asking' "ARG=$c1" "$out"
+hasnt 'and shows no table' 'which session' "$out"
+out=$(run -x -c)
+args=$(printf '%s\n' "$out" | grep '^ARG=' | tr '\n' ' ')
+eq   '-x goes between the standing flags and the resume words' "ARG=--standing ARG=--dangerously-skip-permissions ARG=--resume ARG=$c1 " "$args"
+out=$(run -x -c two)
+args=$(printf '%s\n' "$out" | grep '^ARG=' | tr '\n' ' ')
+eq   'for codex too' "ARG=--codexy ARG=--dangerously-bypass-approvals-and-sandbox ARG=resume ARG=$x1 " "$args"
+out=$(run -c . --model x)
+args=$(printf '%s\n' "$out" | grep '^ARG=' | tr '\n' ' ')
+eq   'agent arguments follow the id' "ARG=--standing ARG=--resume ARG=$c1 ARG=--model ARG=x " "$args"
+out=$(run --here -c)
+has  '--here resumes where you stand' "PWD=$here" "$out"
+out=$(run -d "$projb" -c)
+has  '-d resumes there' "PWD=$projb" "$out"
+out=$(run --continue)
+has  '--continue is -c' "ARG=$c1" "$out"
+rm -rf "$stores"
+out=$(run -c); rc=$?
+eq   'no sessions at all exits 2' 2 "$rc"
+has  'and says so' 'no sessions found' "$(err)"
 
 # --- shell hygiene ------------------------------------------------------------
 

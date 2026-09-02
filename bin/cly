@@ -1353,8 +1353,9 @@ cly_menu_build() {  # DEFAULT-NAME
     done
 }
 
-# Show the menu, read an answer, print the name chosen. A number or a name;
-# Enter takes the default profile when there is one.
+# Show the menu, read an answer, leave the name chosen in picked. A number or
+# a name; Enter takes the default profile when there is one.
+picked=''
 cly_menu_pick() {  # DEFAULT-NAME
     local d=$1 i n reply
     n=${#menu_names[@]}
@@ -1370,15 +1371,15 @@ cly_menu_pick() {  # DEFAULT-NAME
     reply=${reply%$'\r'}
     case $reply in
         '') [ -n "$d" ] || { echo "cly: nothing picked" >&2; return 2; }
-            printf '%s\n' "$d"; return 0 ;;
+            picked=$d; return 0 ;;
         q|Q|quit) echo "cly: nothing picked" >&2; return 2 ;;
         *[!0-9]*)
             for ((i = 0; i < n; i++)); do
-                [ "${menu_names[i]}" = "$reply" ] && { printf '%s\n' "$reply"; return 0; }
+                [ "${menu_names[i]}" = "$reply" ] && { picked=$reply; return 0; }
             done
             echo "cly: '$reply' is not on the menu" >&2; return 2 ;;
         *)  if [ "$reply" -ge 1 ] && [ "$reply" -le "$n" ]; then
-                printf '%s\n' "${menu_names[reply - 1]}"; return 0
+                picked=${menu_names[reply - 1]}; return 0
             fi
             echo "cly: '$reply' is not on the menu" >&2; return 2 ;;
     esac
@@ -1581,7 +1582,8 @@ cly_main() {
         target=$(cly_default_profile) || target=''
         cly_menu_build "$target"
         cly_load_profile ''
-        name=$(cly_menu_pick "$target") || return $?
+        cly_menu_pick "$target" || return $?
+        name=$picked
         echo
     fi
 
