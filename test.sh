@@ -776,6 +776,8 @@ printf '%s\n' \
   > "$stores/claude/history.jsonl"
 echo '{}' > "$stores/claude/projects/${proja//[^A-Za-z0-9]/-}/$c1.jsonl"
 echo '{}' > "$stores/claude/projects/C--Users-me-proj/$c3.jsonl"
+mkdir -p "$stores/claude/projects/C--Users-me-proj/$c3"
+printf '%s' '{"customTitle":"named by hand"}' > "$stores/claude/projects/C--Users-me-proj/$c3/custom-title.json"
 
 x1=01a0aaaa-0000-7000-8000-000000000001
 x2=01a0bbbb-0000-7000-8000-000000000002
@@ -851,6 +853,8 @@ has  'kimi shows the title' 'Kimi fixes the build' "$out"
 hasnt 'an archived kimi session is not offered' 'archived' "$out"
 hasnt 'nor a deleted one' 'deleted' "$out"
 has  'a Windows launch directory reads as a posix one' '/c/Users/me/proj' "$out"
+has  'a session named with /rename shows its name' 'named by hand' "$out"
+hasnt 'instead of its first prompt' 'On Windows' "$out"
 has  'a session older than a week shows its date' 'Aug 20' "$out"
 
 out=$(run -r two)
@@ -869,7 +873,7 @@ out=$(CLY_ROWS=abc run -r); rc=$?
 eq   'a CLY_ROWS that is not a number is ignored' 2 "$rc"
 has  'and the list is whole' 'Kimi fixes the build' "$out"
 out=$(CLY_ROWS=2 run -r)
-has  'CLY_ROWS does not cut the list' 'On Windows' "$out"
+has  'CLY_ROWS does not cut the list' 'named by hand' "$out"
 hasnt 'only the files opened: the oldest gemini session is not read' 'Legacy gemini session' "$out"
 
 write_config 'default=one' "profile.one.bin=$stub" 'profile.one.flags=--standing' 'profile.one.kind=claude' \

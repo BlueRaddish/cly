@@ -131,7 +131,7 @@ Each kind's store, and what cly reads from it:
 
 | Kind | Index read | Resume words |
 |---|---|---|
-| `claude` | `~/.claude/history.jsonl` — every typed prompt with its session id, directory and time; a session whose transcript has been cleaned up is not offered | `--resume ID` |
+| `claude` | `~/.claude/history.jsonl` — every typed prompt with its session id, directory and time; the name from `/rename` (`custom-title.json` beside the transcript) is the title; a session whose transcript has been cleaned up is not offered | `--resume ID` |
 | `codex` | `~/.codex/history.jsonl` and `session_index.jsonl`; the directory comes from the session's rollout file, and a session without one is not offered | `resume ID` |
 | `gemini` | `~/.gemini/tmp/*/chats/session-*.json*`, newest first by name; the directory from the project's `.project_root` or `~/.gemini/projects.json` | `--resume ID` |
 | `kimi` | `~/.kimi-code/session_index.jsonl`, then each session's `state.json` for title, directory and time | `--session ID` |

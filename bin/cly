@@ -582,12 +582,13 @@ cly_add_row() {  # EPOCH KIND ID CWD TITLE
 }
 
 # Claude Code. Every prompt typed into a session is one line of history.jsonl:
-# display, timestamp (ms), project (the launch directory) and sessionId. The
-# first prompt that was not a slash command is a session's title, the last
-# prompt is its age, and a session whose transcript has since been cleaned up
-# is not offered.
+# display, timestamp (ms), project (the launch directory) and sessionId. A
+# name given with /rename sits in a one-line custom-title.json beside the
+# transcript and is the title; else the first prompt that was not a slash
+# command. The last prompt is the session's age, and a session whose
+# transcript has since been cleaned up is not offered.
 cly_sessions_claude() {
-    local root=${CLAUDE_CONFIG_DIR:-$HOME/.claude} line sid ts text pdir
+    local root=${CLAUDE_CONFIG_DIR:-$HOME/.claude} line sid ts text pdir f title
     local -a order=()
     local -A first any cwd last
     cly_read_lines "$root/history.jsonl" || return 0
@@ -615,7 +616,13 @@ cly_sessions_claude() {
         # is not a letter or a digit turned into a dash.
         pdir=${cwd[$sid]//[^A-Za-z0-9]/-}
         [ -s "$root/projects/$pdir/$sid.jsonl" ] || continue
-        cly_add_row "$(( ${last[$sid]} / 1000 ))" claude "$sid" "${cwd[$sid]}" "${first[$sid]:-${any[$sid]}}"
+        title=${first[$sid]:-${any[$sid]}}
+        f=$root/projects/$pdir/$sid/custom-title.json
+        if [ -s "$f" ]; then
+            IFS= read -r line < "$f" || true
+            cly_json_str customTitle "$line" && [ -n "$jv" ] && title=$jv
+        fi
+        cly_add_row "$(( ${last[$sid]} / 1000 ))" claude "$sid" "${cwd[$sid]}" "$title"
     done
 }
 
@@ -1501,8 +1508,9 @@ cly_read_key() {
         c=$key_pending; key_pending=''
         [ "$c" = $'\n' ] && c=''
     else
-        IFS= read -rsn1 c || return 1
+        IFS= read -rsn1 c || { cly_trace 'read: eof'; return 1; }
     fi
+    cly_trace "read: [$c]"
     case $c in
         '')  key=enter ;;
         $'\e')
@@ -1667,6 +1675,12 @@ cly_screen_draw() {  # TITLE HINT HEADER CUR TOP NOTE
     scr_drawn=$lines
 }
 
+# CLY_DEBUG=FILE: a line per step of the screen, for a terminal that
+# misbehaves. Nothing when unset.
+cly_trace() {
+    [ -z "${CLY_DEBUG:-}" ] || printf '%s\n' "$1" >> "$CLY_DEBUG"
+}
+
 # Before the rows are built: whether there is a screen, and how wide it is.
 cly_screen_open() {
     scr_live=0
@@ -1679,10 +1693,13 @@ cly_screen_open() {
 # is back where the frame began, so what runs next starts on a clean line.
 cly_screen_leave() {
     [ "$scr_live" = 1 ] || return 0
+    cly_trace "leave: wiping $scr_drawn lines"
     [ "$scr_drawn" -gt 0 ] && printf '\e[%sA\r\e[J' "$scr_drawn"
+    cly_trace 'leave: wiped'
     printf '\e[?25h'
     scr_drawn=0
     trap - INT TERM
+    cly_trace 'leave: done'
 }
 
 # Show scr_lines[] and let one be picked: picked_index is its index, and
@@ -1737,7 +1754,9 @@ cly_screen_pick() {  # TITLE HINT HEADER START
             cly_screen_draw "$title" "$hint2" "$header" "$cur" "$top" "$note"
             last_top=$top; last_cur=$cur; last_n=$n; last_note=$note
         fi
+        cly_trace "frame: drawn=$scr_drawn cur=$cur top=$top n=$n; waiting"
         cly_read_key || { cly_screen_leave; return 2; }
+        cly_trace "key: $key"
         case $key in
             up)      cur=$(( cur - 1 )); continue ;;
             down)    cur=$(( cur + 1 )); continue ;;
@@ -1816,8 +1835,10 @@ cly_pick_session() {  # [KIND] [NO-ASK]
         cly_screen_open
         [ "$scr_live" = 1 ] && printf 'cly: reading sessions...\r'
     fi
+    cly_trace 'sessions: reading'
     cly_sessions_all "$kind"
     n=${#ses_rows[@]}
+    cly_trace "sessions: $n read"
     if [ "$n" = 0 ]; then
         [ "$scr_live" = 1 ] && printf '\e[K'
         echo "cly: no sessions found${kind:+ for $kind}" >&2
@@ -1852,7 +1873,9 @@ cly_pick_session() {  # [KIND] [NO-ASK]
         if [ -z "$row_cwd" ]; then cly_session_cwd "$row_kind" "$row_id"; row_cwd=$jv; fi
         return 0
     fi
+    cly_trace 'pick: nothing picked'
     echo "cly: nothing picked" >&2
+    cly_trace 'pick: said so'
     return 2
 }
 
@@ -2130,3 +2153,6 @@ cly_main() {
 }
 
 cly_main "$@"
+cly_rc=$?
+cly_trace "exit: $cly_rc"
+exit "$cly_rc"
