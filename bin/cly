@@ -56,6 +56,11 @@ cly_emit() {
 # Skipping permissions is no longer part of it: that is what -x is for.
 CLY_CLAUDE_FLAGS='--remote-control'
 
+# What a v2 config with no flags= line meant, and still means: v2 had no -x,
+# so taking the bypass out of it would change a launch nobody edited. -x sees
+# the flag already there and adds nothing.
+CLY_V2_FLAGS='--remote-control --dangerously-skip-permissions'
+
 # A profile may not take one of these names: the first word means these first.
 CLY_RESERVED='. init config help version'
 
@@ -157,8 +162,8 @@ cly_config_legacy_fixup() {
     if [ "$cfg_legacy_has_flags" = 1 ]; then
         prof_flags=$cfg_legacy_flags
     else
-        # A v2 config with no flags= line meant the standing default.
-        prof_flags=$CLY_CLAUDE_FLAGS
+        # A v2 config with no flags= line meant v2's standing default.
+        prof_flags=$CLY_V2_FLAGS
     fi
 }
 
@@ -1221,6 +1226,15 @@ cly_exec() {  # BIN FLAGS ENV ARG...
     # shellcheck disable=SC2086
     for kv in $env; do
         k=${kv%%=*}; v=${kv#*=}
+        case $kv in
+            *=*) ;;
+            *) echo "cly: env= entry '$kv' is not NAME=VALUE" >&2; return 2 ;;
+        esac
+        case $k in
+            ''|[0-9]*|*[!A-Za-z0-9_]*)
+                echo "cly: env= entry '$kv' does not start with a variable name" >&2
+                return 2 ;;
+        esac
         case $v in
             '$'[A-Za-z_]*) n=${v#\$}; n=${n%%[!A-Za-z0-9_]*}; v=${!n:-} ;;
         esac
@@ -1742,10 +1756,18 @@ cly_main() {
         help)    cly_help; return 0 ;;
         version) echo "cly $CLY_VERSION"; return 0 ;;
         init)
+            if [ $# -gt 1 ]; then
+                cly_usage_error "init takes one name, and '$2' would be dropped — flags are asked for, not given here"
+                return 2
+            fi
             cly_load_profile ''
             cly_cmd_init "${1:-}"
             return $? ;;
         config)
+            if [ $# -gt 1 ]; then
+                cly_usage_error "config takes one name"
+                return 2
+            fi
             cly_load_profile ''
             target=${1:-}
             if [ "$target" = . ]; then
@@ -1885,6 +1907,7 @@ cly_main() {
             echo "cly: run 'cly init $name' to make one anyway" >&2
             return 2
         fi
+        cly_is_valid_name "$name" || { cly_name_error "$name"; return 2; }
         cly_pin_implicit_default "$name" || return 1
         cly_setup_profile "$name" "cly: no $name profile yet — ${cat_bin:-$name} is on your PATH." || return $?
         if [ -z "$cfg_default" ] && [ -z "$cfg_profiles" ]; then

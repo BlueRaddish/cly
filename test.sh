@@ -608,6 +608,13 @@ has  'env= sets a variable' 'ENV CLY_T_A=1' "$out"
 has  'and reads $NAME from the environment' 'ENV CLY_T_B=secret' "$out"
 out=$(run .)
 has  'an unset $NAME is empty' 'ENV CLY_T_B=' "$out"
+write_config 'default=one' "profile.one.bin=$stub" 'profile.one.env=CLY_T_A'
+out=$(run .); rc=$?
+eq   'an env= entry without an = is refused' 2 "$rc"
+hasnt 'and launches nothing' 'PWD=' "$out"
+write_config 'default=one' "profile.one.bin=$stub" 'profile.one.env=1BAD=x'
+out=$(run .); rc=$?
+eq   'so is one that is not a variable name' 2 "$rc"
 
 # kind= and env= survive the setup questions, which never ask about them.
 write_config 'default=one' "profile.one.bin=$stub" 'profile.one.kind=claude' 'profile.one.env=CLY_T_A=1' '# a note'
@@ -632,6 +639,14 @@ eq   'an invalid name at init is refused' 2 "$rc"
 out=$(run init -x); rc=$?
 eq   'so is one that starts with a dash: it would be one of the options' 2 "$rc"
 has  'and the error says so' 'a leading' "$(err)"
+out=$(run init codex --search); rc=$?
+eq   'init with words after the name is refused' 2 "$rc"
+has  'and says what would have been dropped' "'--search' would be dropped" "$(err)"
+out=$(run config one two); rc=$?
+eq   'config with words after the name is refused' 2 "$rc"
+out=$(CLY_ASSUME_TTY=1 run 'bad.name'); rc=$?
+eq   'an invalid name that is on the PATH is refused before anything is written' 2 "$rc"
+eq   'and the config is untouched' "$(printf '%s\n' 'default=one' "profile.one.bin=$stub")" "$(config)"
 eq   'before anything is written' "$(printf '%s\n' 'default=one' "profile.one.bin=$stub")" "$(config)"
 write_config 'default=one' "profile.one.bin=$stub" 'profile.one.kind=claude' 'profile.one.env=CLY_T_A=1'
 out=$(run config)
