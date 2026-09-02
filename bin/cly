@@ -1698,7 +1698,7 @@ picked_index=-1
 picked_bypass=0
 cly_screen_pick() {  # TITLE HINT HEADER START
     local title=$1 hint=$2 header=$3 cur=${4:-0} top=0 query='' jump='' mode='' n avail
-    local note='' hint2 last_top=-1 last_cur=-1 last_n=-1 last_note='' skipped=0
+    local note='' hint2 last_top=-1 last_cur=-1 last_n=-1 last_note=''
     local LC_ALL=${LC_ALL:-${LANG:-C.UTF-8}}
     picked_index=-1
     picked_bypass=0
@@ -1723,15 +1723,9 @@ cly_screen_pick() {  # TITLE HINT HEADER START
         else
             note=${query:+/$query}; hint2=$hint
         fi
-        # A held-down arrow queues keys faster than frames draw; while more
-        # input is waiting, apply the key and draw later. Never more than a
-        # few in a row, in case a terminal claims input it does not have.
-        if [ "$scr_live" = 1 ] && [ "$skipped" -lt 8 ] && read -t 0; then
-            skipped=$(( skipped + 1 ))
-        elif [ "$scr_live" = 1 ] && [ "$scr_drawn" -gt 0 ] && [ "$top" = "$last_top" ] \
+        if [ "$scr_live" = 1 ] && [ "$scr_drawn" -gt 0 ] && [ "$top" = "$last_top" ] \
                 && [ "$n" = "$last_n" ] && [ "$note" = "$last_note" ]; then
             # Only the bar moved: the two rows and the position, not the frame.
-            skipped=0
             cly_screen_titletext "$title" "$cur" "$n" "$note"
             cly_screen_line 0 "$titletext"
             if [ "$last_cur" != "$cur" ]; then
@@ -1740,7 +1734,6 @@ cly_screen_pick() {  # TITLE HINT HEADER START
             fi
             last_cur=$cur
         else
-            skipped=0
             cly_screen_draw "$title" "$hint2" "$header" "$cur" "$top" "$note"
             last_top=$top; last_cur=$cur; last_n=$n; last_note=$note
         fi
