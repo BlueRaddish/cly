@@ -1380,9 +1380,11 @@ cly_no_profile_error() {  # NAME
 # menu_lines[] side by side.
 menu_names=()
 menu_lines=()
+menu_tints=()
+menu_dims=()
 cly_menu_build() {  # DEFAULT-NAME
     local d=$1 n label where state line
-    menu_names=(); menu_lines=()
+    menu_names=(); menu_lines=(); menu_tints=(); menu_dims=()
     # shellcheck disable=SC2086
     for n in $cfg_profiles; do
         cly_load_profile "$n"
@@ -1394,6 +1396,7 @@ cly_menu_build() {  # DEFAULT-NAME
         menu_names+=("$n")
         printf -v line '%-9s %-12s %s' "$n" "$label" "${where:-here}"
         menu_lines+=("$line")
+        cly_tint "$res_kind"; menu_tints+=("$tint"); menu_dims+=(0)
     done
     for n in $CLY_CATALOG; do
         case " $cfg_profiles " in *" $n "*) continue ;; esac
@@ -1407,25 +1410,38 @@ cly_menu_build() {  # DEFAULT-NAME
         menu_names+=("$n")
         printf -v line '%-9s %-12s %s' "$n" "$cat_label" "$state"
         menu_lines+=("$line")
+        cly_tint "$n"; menu_tints+=("$tint")
+        if command -v "$cat_bin" >/dev/null 2>&1; then menu_dims+=(0); else menu_dims+=(1); fi
     done
 }
 
 # --- the screen ---------------------------------------------------------------
 #
 # One picker serves the menu and the sessions, after the one Claude Code's
-# --resume shows: the list on its own screen, a bar on the row in hand, arrows
-# to move, letters to filter, digits to jump to a row, Enter to take it, Esc to
-# leave. It is ANSI escapes and `read -n1`, nothing outside the shell. With
+# --resume shows: a list with a bar on the row in hand, arrows to move, / to
+# search, digits to jump to a row, Enter to take it, x to take it with the
+# prompts skipped, Esc to leave. It is ANSI escapes and `read -n1`, nothing
+# outside the shell.
+#
+# It is drawn the way Ink draws Claude Code's picker: the frame is printed,
+# and every redraw moves the cursor back up over it and prints it again, each
+# line cleared to its end. No alternate screen, no clear-screen, no absolute
+# cursor moves — measured 2026-09-01: through Git's bash in a plain conhost
+# window those are not honoured and every frame lands below the last, while
+# cursor-up and clear-to-end work there and in Windows Terminal alike. With
 # answers piped in (the suite, or `echo 2 | cly -r`) the same keys arrive the
-# same way, only nothing is cleared or coloured; with no terminal at all the
+# same way, only nothing is moved or coloured; with no terminal at all the
 # list is printed once and nothing is picked.
 
 scr_lines=()     # what each row shows
 scr_keys=()      # what each row is called, for the filter
+scr_tint=()      # the colour of each row's first column, an SGR number or ''
+scr_dim=()       # 1 for a row drawn faint (a tool that is not there)
 scr_match=()     # the rows that match the filter, as indexes into the above
 scr_rows=24
 scr_cols=80
 scr_live=0       # 1 when the screen is a terminal that can be drawn on
+scr_drawn=0      # lines the last frame took, to move back over
 picked_index=-1
 key=''
 
@@ -1505,6 +1521,23 @@ cly_clip() {  # TEXT WIDTH
     esac
 }
 
+# One colour per agent, so a mixed list reads at a glance. Plain SGR numbers:
+# they are the ones every console has.
+tint=''
+cly_tint() {  # KIND-OR-NAME → tint
+    case $1 in
+        claude)   tint=33 ;;   # yellow
+        codex)    tint=32 ;;   # green
+        gemini)   tint=36 ;;   # cyan
+        kimi)     tint=35 ;;   # magenta
+        qwen)     tint=34 ;;   # blue
+        opencode) tint=37 ;;   # white
+        deepseek) tint=96 ;;   # bright cyan
+        meta)     tint=94 ;;   # bright blue
+        *)        tint='' ;;
+    esac
+}
+
 # The rows that match the filter: names that start with it first, then any
 # row that has it somewhere. Case does not matter.
 cly_screen_filter() {  # QUERY
@@ -1526,48 +1559,77 @@ cly_screen_filter() {  # QUERY
     scr_match+=(${rest[@]+"${rest[@]}"})
 }
 
-cly_screen_draw() {  # TITLE HINT HEADER CUR TOP QUERY
-    local title=$1 hint=$2 header=$3 cur=$4 top=$5 query=$6
-    local out='' i j n avail status line pad w
+cly_screen_draw() {  # TITLE HINT HEADER CUR TOP NOTE
+    local title=$1 hint=$2 header=$3 cur=$4 top=$5 note=$6
+    local out='' i j n avail status line pad w eol='' lines=0 col
     n=${#scr_match[@]}
-    avail=$(( scr_rows - 4 ))
+    avail=$(( scr_rows - 5 ))
     [ "$avail" -ge 1 ] || avail=1
     w=$(( scr_cols - 1 ))
-    if [ "$scr_live" = 1 ]; then out=$'\e[H\e[2J'; fi
+    if [ "$scr_live" = 1 ]; then
+        eol=$'\e[K'
+        [ "$scr_drawn" -gt 0 ] && out=$'\e['"$scr_drawn"$'A\r'
+    fi
     status="$(( n > 0 ? cur + 1 : 0 ))/$n"
-    [ -z "$query" ] || status="$query  $status"
+    [ -z "$note" ] || status="$note  $status"
     cly_clip "$title" $(( w - ${#status} - 2 ))
     printf -v pad '%*s' $(( w - ${#clipped} - ${#status} )) ''
-    if [ "$scr_live" = 1 ]; then out+=$'\e[1m'"$clipped"$'\e[0m'"$pad$status"$'\n'
+    if [ "$scr_live" = 1 ]; then out+=$'\e[1m'"$clipped"$'\e[0m'"$pad"$'\e[2m'"$status"$'\e[0m'"$eol"$'\n'
     else out+="$clipped$pad$status"$'\n'; fi
+    lines=$(( lines + 1 ))
     cly_clip "$hint" "$w"
-    if [ "$scr_live" = 1 ]; then out+=$'\e[2m'"$clipped"$'\e[0m\n'; else out+="$clipped"$'\n'; fi
+    if [ "$scr_live" = 1 ]; then out+=$'\e[2m'"$clipped"$'\e[0m'"$eol"$'\n'; else out+="$clipped"$'\n'; fi
+    lines=$(( lines + 1 ))
     if [ -n "$header" ]; then
         cly_clip "$header" "$w"
-        if [ "$scr_live" = 1 ]; then out+=$'\e[2m'"$clipped"$'\e[0m\n'; else out+="$clipped"$'\n'; fi
+        if [ "$scr_live" = 1 ]; then out+=$'\e[2;4m'"$clipped"$'\e[0m'"$eol"$'\n'; else out+="$clipped"$'\n'; fi
     else
-        out+=$'\n'
+        out+="$eol"$'\n'
     fi
+    lines=$(( lines + 1 ))
     for ((j = top; j < top + avail && j < n; j++)); do
         i=${scr_match[j]}
         printf -v line '  %3s  %s' $(( i + 1 )) "${scr_lines[i]}"
         cly_clip "$line" "$w"
-        if [ "$j" = "$cur" ] && [ "$scr_live" = 1 ]; then
+        lines=$(( lines + 1 ))
+        if [ "$scr_live" != 1 ]; then
+            if [ "$j" = "$cur" ]; then out+="> ${clipped#  }"$'\n'; else out+="$clipped"$'\n'; fi
+            continue
+        fi
+        if [ "$j" = "$cur" ]; then
             printf -v pad '%*s' $(( w - ${#clipped} )) ''
-            out+=$'\e[7m'"$clipped$pad"$'\e[0m\n'
-        elif [ "$j" = "$cur" ]; then
-            out+="> ${clipped#  }"$'\n'
+            out+=$'\e[7;1m'"> ${clipped#  }$pad"$'\e[0m'"$eol"$'\n'
+        elif [ "${scr_dim[i]:-0}" = 1 ]; then
+            out+=$'\e[2m'"$clipped"$'\e[0m'"$eol"$'\n'
+        elif [ -n "${scr_tint[i]:-}" ]; then
+            # The number, then the first column in its colour.
+            col=${clipped:0:7}
+            out+="$col"$'\e['"${scr_tint[i]}"$'m'"${clipped:7:9}"$'\e[0m'"${clipped:16}$eol"$'\n'
         else
-            out+="$clipped"$'\n'
+            out+="$clipped$eol"$'\n'
         fi
     done
-    [ "$n" -gt 0 ] || out+='  (nothing matches)'$'\n'
+    if [ "$n" = 0 ]; then out+="  (nothing matches)$eol"$'\n'; lines=$(( lines + 1 )); fi
+    [ "$scr_live" = 1 ] && out+=$'\e[J'
     printf '%s' "$out"
+    scr_drawn=$lines
 }
 
+# Before the rows are built: whether there is a screen, and how wide it is.
+cly_screen_open() {
+    scr_live=0
+    [ -t 0 ] && [ -t 1 ] && scr_live=1
+    scr_drawn=0
+    cly_screen_size
+}
+
+# Leave the way Claude Code's picker leaves: the frame is wiped and the cursor
+# is back where the frame began, so what runs next starts on a clean line.
 cly_screen_leave() {
     [ "$scr_live" = 1 ] || return 0
-    printf '\e[?25h\e[?1049l'
+    [ "$scr_drawn" -gt 0 ] && printf '\e[%sA\r\e[J' "$scr_drawn"
+    printf '\e[?25h'
+    scr_drawn=0
     trap - INT TERM
 }
 
@@ -1587,14 +1649,15 @@ cly_screen_pick() {  # TITLE HINT HEADER START
     local LC_ALL=${LC_ALL:-${LANG:-C.UTF-8}}
     picked_index=-1
     picked_bypass=0
+    scr_drawn=0
     if [ "$scr_live" = 1 ]; then
-        printf '\e[?1049h\e[?25l'
+        printf '\e[?25l'
         trap 'cly_screen_leave; exit 130' INT TERM
     fi
     cly_screen_filter ''
     while :; do
         n=${#scr_match[@]}
-        avail=$(( scr_rows - 4 )); [ "$avail" -ge 1 ] || avail=1
+        avail=$(( scr_rows - 5 )); [ "$avail" -ge 1 ] || avail=1
         [ "$cur" -lt "$n" ] || cur=$(( n - 1 ))
         [ "$cur" -ge 0 ] || cur=0
         [ "$cur" -ge "$top" ] || top=$cur
@@ -1657,8 +1720,11 @@ cly_screen_pick() {  # TITLE HINT HEADER START
 picked=''
 cly_menu_pick() {  # DEFAULT-NAME
     local d=$1 i n=${#menu_names[@]} start=0
+    cly_screen_open
     scr_lines=("${menu_lines[@]}")
     scr_keys=("${menu_names[@]}")
+    scr_tint=("${menu_tints[@]}")
+    scr_dim=("${menu_dims[@]}")
     for ((i = 0; i < n; i++)); do [ "${menu_names[i]}" = "$d" ] && start=$i; done
     if cly_screen_pick "cly $CLY_VERSION — which agent?" \
             'up/down move · Enter launch · x launch skipping prompts · / search · Esc quit' '' "$start"; then
@@ -1708,6 +1774,7 @@ cly_pick_session() {  # [KIND] [NO-ASK]
         echo "cly: no terminal to pick at — run this in one, or 'cly NAME' with the agent's own resume flag" >&2
         return 2
     fi
+    cly_screen_open
     cly_session_lines
     if cly_screen_pick "cly $CLY_VERSION — which session?${kind:+  ($kind only)}" \
             "up/down move · Enter resume · x resume skipping prompts · / search · Esc quit${more:+ · $more}" \
@@ -1728,7 +1795,7 @@ cly_session_lines() {
     wtitle=$(( scr_cols - 3 - 2 - 8 - 2 - 8 - 2 - wwhere - 2 ))
     [ "$wtitle" -ge 20 ] || wtitle=20
     printf -v scr_header '  %3s  %-8s  %-8s  %-*s  %s' '#' agent last "$wwhere" where title
-    scr_lines=(); scr_keys=()
+    scr_lines=(); scr_keys=(); scr_tint=(); scr_dim=()
     for ((i = 0; i < n; i++)); do
         cly_row_fields "${ses_rows[i]}"
         cly_age "$row_epoch"
@@ -1737,6 +1804,7 @@ cly_session_lines() {
         printf -v line '%-8s  %-8s  %-*s  %s' "$row_kind" "$age" "$wwhere" "${where:-?}" "$title"
         scr_lines+=("$line")
         scr_keys+=("$row_kind")
+        cly_tint "$row_kind"; scr_tint+=("$tint"); scr_dim+=(0)
     done
 }
 
