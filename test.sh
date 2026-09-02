@@ -683,9 +683,18 @@ has  'Enter launches the default' 'ARG=--aa' "$out"
 out=$(ask '2
 ')
 has  'a number launches that row' 'ARG=--bb' "$out"
+out=$(ask '/b
+')
+has  '/ then a name launches that profile' 'ARG=--bb' "$out"
 out=$(ask 'b
 ')
-has  'a name launches that profile' 'ARG=--bb' "$out"
+has  'a letter outside a search is not a command: Enter still takes the default' 'ARG=--aa' "$out"
+out=$(ask 'x')
+has  'x launches the row in hand with its prompts skipped' 'ARG=--dangerously-skip-permissions' "$out"
+has  'and the standing flags' 'ARG=--aa' "$out"
+out=$(ask '2x')
+has  'a number then x does the same for that row' 'ARG=--dangerously-bypass-approvals-and-sandbox' "$out"
+has  'with its flags' 'ARG=--bb' "$out"
 out=$(ask $'\e'); rc=$?
 eq   'Esc picks nothing' 2 "$rc"
 hasnt 'and launches nothing' 'PWD=' "$out"
@@ -697,7 +706,7 @@ out=$(ask ''); rc=$?
 eq   'no answer at all exits 2' 2 "$rc"
 
 # Picking an installed tool that has no profile sets it up on the spot.
-out=$(ask 'claude
+out=$(ask '/claude
 none
 
 ')
@@ -708,19 +717,19 @@ has  'the default did not move' 'default=a' "$(config)"
 
 # Picking one that is not installed prints how to get it. qwen, gemini and
 # kimi start with letters a picker might have kept for itself; none is.
-out=$(ask 'qwen
+out=$(ask '/qwen
 '); rc=$?
 eq   'a name starting with q can be typed' 2 "$rc"
 has  'and is the one picked' 'qwen-code' "$(err)"
-out=$(ask 'kimi
+out=$(ask '/kimi
 '); rc=$?
 has  'so can one starting with k' 'kimi-code' "$(err)"
-out=$(ask 'gemini
+out=$(ask '/gemini
 '); rc=$?
 eq   'a tool that is not installed exits 2' 2 "$rc"
 has  'and says what to install' 'npm install -g @google/gemini-cli' "$(err)"
 has  'and how to sign in' 'Login with Google' "$(err)"
-out=$(ask 'deepseek
+out=$(ask '/deepseek
 '); rc=$?
 eq   'a route whose host is missing exits 2' 2 "$rc"
 has  'and names the host' 'ollama' "$(err)"
@@ -729,7 +738,7 @@ has  'and names the host' 'ollama' "$(err)"
 # kind, so -x and -r treat it as Claude Code.
 { echo '#!/usr/bin/env bash'; echo 'true'; } > "$work/bin/ollama"
 chmod +x "$work/bin/ollama"
-out=$(ask 'deepseek
+out=$(ask '/deepseek
 
 
 
@@ -872,9 +881,14 @@ has  'and says what it is doing' "resuming claude session ${c1:0:8} in $proja" "
 out=$(ask '3
 ' -r)
 has  'a number resumes that row' "ARG=$x1" "$out"
-out=$(ask 'kimi3
-' -r)
-has  'a number typed after letters starts over from the full list' "ARG=$x1" "$out"
+out=$(ask $'/kimi\e3\n' -r)
+has  'Esc clears a search, and a number then goes to that row of the full list' "ARG=$x1" "$out"
+out=$(ask 'x' -r)
+has  'x resumes the row in hand with its prompts skipped' 'ARG=--dangerously-skip-permissions' "$out"
+has  'the newest one' "ARG=$c1" "$out"
+out=$(ask '3x' -r)
+args=$(printf '%s\n' "$out" | grep '^ARG=' | tr '\n' ' ')
+eq   'a number then x, for codex' "ARG=--codexy ARG=--dangerously-bypass-approvals-and-sandbox ARG=resume ARG=$x1 " "$args"
 has  'by the profile of its kind' 'ARG=--codexy' "$out"
 has  'with its own resume words' 'ARG=resume' "$out"
 has  'in the directory its rollout names' "PWD=$projb" "$out"

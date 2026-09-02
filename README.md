@@ -52,7 +52,7 @@ cly 4.0.0 — which agent?
     8  meta      Llama        not installed: ollama, from https://ollama.com/download, then: ollama pull llama3.1
 ```
 
-Move with the arrows, type a name to narrow the list, press Enter. Picking a tool that is installed but has no profile asks the setup questions and then launches it; picking one that is not installed prints how to get it and how to sign in. `cly init NAME` asks the same questions on their own:
+Move with the arrows and press Enter, or `x` to launch with the agent's prompts skipped; `/` searches the list. Picking a tool that is installed but has no profile asks the setup questions and then launches it; picking one that is not installed prints how to get it and how to sign in. `cly init NAME` asks the same questions on their own:
 
 ```console
 $ cly init claude
@@ -123,7 +123,7 @@ up/down move · type to filter · Enter resume · Esc quit · 30 of 76 · CLY_RO
     5  kimi      4d ago    ~/work/api                  Kimi fixes the build
 ```
 
-The screen is modelled on the one `claude --resume` shows. Arrows, PgUp/PgDn, Home/End move the bar; letters filter the list (`codex` keeps only Codex's rows, a word keeps the rows whose title has it); digits jump to a row; Enter resumes; Esc leaves. Letters are never commands, so `qwen` and `kimi` can be typed. `cly -c` skips the screen and resumes the newest session; `-x` before either adds the bypass flag.
+The screen is modelled on the one `claude --resume` shows. Arrows, PgUp/PgDn, Home/End move the bar; Enter resumes; `x` resumes with the agent's prompts skipped, as if `-x` had been typed; `/` starts a search (`codex` keeps only Codex's rows, a word keeps the rows whose title has it; Esc clears it); digits go to a row by number; Esc leaves. Outside a search, letters do nothing, so nothing typed by accident is a command. `cly -c` skips the screen and resumes the newest session; `-x` before either adds the bypass flag.
 
 A session is resumed **in the directory it was started in** — every agent keys its store or its own picker on that directory — by the profile of its kind, with that profile's standing flags, or by the bare agent when no profile has that kind. `cly -r NAME` narrows the list to one agent; `cly -r .` to the default profile's. Without a terminal (`cly -r < /dev/null`, a script) the list is printed once and the exit status is 2.
 

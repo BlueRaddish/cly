@@ -1284,7 +1284,8 @@ cly_cmd_init() {  # [NAME]
     echo "  Enter a name — claude, codex, gemini, kimi, whatever you run."
     printf '  [%s] > ' "${cfg_default:-claude}"
     IFS= read -r reply || { cly_no_answer; return 2; }
-    reply=${reply%$''}
+    reply=${reply%$'
+'}
     name=${reply:-${cfg_default:-claude}}
     cly_is_reserved "$name" && { cly_reserved_error "$name"; return 2; }
     cly_is_valid_name "$name" || { cly_name_error "$name"; return 2; }
@@ -1446,9 +1447,17 @@ cly_screen_size() {
 }
 
 # One key, named: up down pgup pgdn home end enter esc bs, or the character.
+# An Esc that turns out not to start a sequence is an Esc, and the key that
+# followed it is kept for the next call rather than lost.
+key_pending=''
 cly_read_key() {
     local c r n
-    IFS= read -rsn1 c || return 1
+    if [ -n "$key_pending" ]; then
+        c=$key_pending; key_pending=''
+        [ "$c" = $'\n' ] && c=''
+    else
+        IFS= read -rsn1 c || return 1
+    fi
     case $c in
         '')  key=enter ;;
         $'\e')
@@ -1468,6 +1477,8 @@ cly_read_key() {
                             esac ;;
                         *) key=other ;;
                     esac ;;
+                '') key_pending=$'\n' ;;
+                *)  key_pending=$r ;;
             esac ;;
         $'\x7f'|$'\b') key=bs ;;
         $'\x03') key=esc ;;
@@ -1524,7 +1535,7 @@ cly_screen_draw() {  # TITLE HINT HEADER CUR TOP QUERY
     w=$(( scr_cols - 1 ))
     if [ "$scr_live" = 1 ]; then out=$'\e[H\e[2J'; fi
     status="$(( n > 0 ? cur + 1 : 0 ))/$n"
-    [ -z "$query" ] || status="filter: $query  $status"
+    [ -z "$query" ] || status="$query  $status"
     cly_clip "$title" $(( w - ${#status} - 2 ))
     printf -v pad '%*s' $(( w - ${#clipped} - ${#status} )) ''
     if [ "$scr_live" = 1 ]; then out+=$'\e[1m'"$clipped"$'\e[0m'"$pad$status"$'\n'
@@ -1560,15 +1571,21 @@ cly_screen_leave() {
     trap - INT TERM
 }
 
-# Show scr_lines[] and let one be picked: picked_index is its index, or the
-# function returns 2 with nothing picked. START is the row to begin on.
+# Show scr_lines[] and let one be picked: picked_index is its index, and
+# picked_bypass is 1 when it was taken with x rather than Enter. Returns 2
+# with nothing picked. START is the row to begin on. Keys, after Claude
+# Code's own picker: arrows and the paging keys move, Enter takes the row,
+# / starts a search that letters then type into (Esc clears it), digits go to
+# a row by number, x takes the row with the agent's prompts skipped, Esc
+# leaves. Outside a search, letters do nothing — so nothing typed by accident
+# is a command.
+picked_index=-1
+picked_bypass=0
 cly_screen_pick() {  # TITLE HINT HEADER START
-    local title=$1 hint=$2 header=$3 cur=${4:-0} top=0 query='' n avail i
+    local title=$1 hint=$2 header=$3 cur=${4:-0} top=0 query='' jump='' mode='' n avail
     local LC_ALL=${LC_ALL:-${LANG:-C.UTF-8}}
     picked_index=-1
-    scr_live=0
-    [ -t 0 ] && [ -t 1 ] && scr_live=1
-    cly_screen_size
+    picked_bypass=0
     if [ "$scr_live" = 1 ]; then
         printf '\e[?1049h\e[?25l'
         trap 'cly_screen_leave; exit 130' INT TERM
@@ -1582,38 +1599,51 @@ cly_screen_pick() {  # TITLE HINT HEADER START
         [ "$cur" -ge "$top" ] || top=$cur
         [ "$cur" -lt $(( top + avail )) ] || top=$(( cur - avail + 1 ))
         [ "$top" -ge 0 ] || top=0
-        cly_screen_draw "$title" "$hint" "$header" "$cur" "$top" "$query"
+        if [ "$mode" = search ]; then
+            cly_screen_draw "$title" 'type to search · Backspace · Enter take the row · Esc clear the search' "$header" "$cur" "$top" "/$query"
+        elif [ -n "$jump" ]; then
+            cly_screen_draw "$title" "$hint" "$header" "$cur" "$top" "row $jump"
+        else
+            cly_screen_draw "$title" "$hint" "$header" "$cur" "$top" ''
+        fi
         cly_read_key || { cly_screen_leave; return 2; }
         case $key in
-            up)      cur=$(( cur - 1 )) ;;
-            down)    cur=$(( cur + 1 )) ;;
-            pgup)    cur=$(( cur - avail )) ;;
-            pgdn)    cur=$(( cur + avail )) ;;
-            home)    cur=0 ;;
-            end)     cur=$(( n - 1 )) ;;
-            esc)     cly_screen_leave; return 2 ;;
+            up)      cur=$(( cur - 1 )); continue ;;
+            down)    cur=$(( cur + 1 )); continue ;;
+            pgup)    cur=$(( cur - avail )); continue ;;
+            pgdn)    cur=$(( cur + avail )); continue ;;
+            home)    cur=0; continue ;;
+            end)     cur=$(( n - 1 )); continue ;;
             enter)
                 [ "$n" -gt 0 ] || continue
                 picked_index=${scr_match[cur]}
                 cly_screen_leave
                 return 0 ;;
-            bs)
-                query=${query%?}
-                cly_screen_filter "$query"; cur=0; top=0 ;;
+            other)   continue ;;
+        esac
+        if [ "$mode" = search ]; then
+            case $key in
+                esc) query=''; mode=''; cly_screen_filter ''; cur=0; top=0 ;;
+                bs)  query=${query%?}; cly_screen_filter "$query"; cur=0; top=0 ;;
+                ?)   query="$query$key"; cly_screen_filter "$query"; cur=0; top=0 ;;
+            esac
+            continue
+        fi
+        case $key in
+            esc)  cly_screen_leave; return 2 ;;
+            /)    mode=search; jump='' ;;
+            x|X)
+                [ "$n" -gt 0 ] || continue
+                picked_index=${scr_match[cur]}
+                picked_bypass=1
+                cly_screen_leave
+                return 0 ;;
             [0-9])
-                # Digits are a row number; letters are a filter. One replaces
-                # the other, list and all.
-                case $query in
-                    ''|*[!0-9]*) query=''; cly_screen_filter ''; top=0 ;;
-                esac
-                query="$query$key"
-                cur=$(( 10#$query - 1 ))
-                [ "$cur" -ge 0 ] || cur=0 ;;
-            other) ;;
-            *)
-                case $query in *[!0-9]*|'') ;; *) query='' ;; esac
-                query="$query$key"
-                cly_screen_filter "$query"; cur=0; top=0 ;;
+                jump="$jump$key"
+                cur=$(( 10#$jump - 1 )) ;;
+            bs)
+                jump=${jump%?}
+                [ -z "$jump" ] || cur=$(( 10#$jump - 1 )) ;;
         esac
         [ "$cur" -ge 0 ] || cur=0
     done
@@ -1628,7 +1658,7 @@ cly_menu_pick() {  # DEFAULT-NAME
     scr_keys=("${menu_names[@]}")
     for ((i = 0; i < n; i++)); do [ "${menu_names[i]}" = "$d" ] && start=$i; done
     if cly_screen_pick "cly $CLY_VERSION — which agent?" \
-            'up/down move · type a name · Enter launch · Esc quit' '' "$start"; then
+            'up/down move · Enter launch · x launch skipping prompts · / search · Esc quit' '' "$start"; then
         picked=${menu_names[picked_index]}
         return 0
     fi
@@ -1677,7 +1707,7 @@ cly_pick_session() {  # [KIND] [NO-ASK]
     fi
     cly_session_lines
     if cly_screen_pick "cly $CLY_VERSION — which session?${kind:+  ($kind only)}" \
-            "up/down move · type to filter · Enter resume · Esc quit${more:+ · $more}" \
+            "up/down move · Enter resume · x resume skipping prompts · / search · Esc quit${more:+ · $more}" \
             "$scr_header" 0; then
         cly_row_fields "${ses_rows[picked_index]}"
         return 0
@@ -1805,6 +1835,7 @@ cly_main() {
             fi
         fi
         cly_pick_session "$filter" "$opt_c" || return $?
+        [ "$picked_bypass" = 1 ] && opt_x=1
         cwd=$row_cwd
         # The profile named, if it is one; else the first of the row's kind.
         [ -n "$name" ] && cly_load_profile "$name"
@@ -1860,6 +1891,7 @@ cly_main() {
         cly_load_profile ''
         cly_menu_pick "$target" || return $?
         name=$picked
+        [ "$picked_bypass" = 1 ] && opt_x=1
         echo
     fi
 
