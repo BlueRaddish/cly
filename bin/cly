@@ -1284,8 +1284,10 @@ cly_cmd_init() {  # [NAME]
     echo "  Enter a name — claude, codex, gemini, kimi, whatever you run."
     printf '  [%s] > ' "${cfg_default:-claude}"
     IFS= read -r reply || { cly_no_answer; return 2; }
+    reply=${reply%$''}
     name=${reply:-${cfg_default:-claude}}
     cly_is_reserved "$name" && { cly_reserved_error "$name"; return 2; }
+    cly_is_valid_name "$name" || { cly_name_error "$name"; return 2; }
     echo
 
     case " $cfg_profiles " in

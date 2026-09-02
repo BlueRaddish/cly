@@ -265,6 +265,14 @@ has  'an empty answer means launch here' 'profile.claude.dir=none' "$(config)"
 out=$(run .)
 has  'the default is still the first one' 'ARG=--search' "$out"
 
+# The answer to "which tool" is a name, checked as one before it is written.
+write_config 'default=a' "profile.a.bin=$stub" "profile.b.bin=$stub"
+out=$(ask 'a b
+' init); rc=$?
+eq   'an answer that is not a name is refused' 2 "$rc"
+has  'and default= is untouched' 'default=a' "$(config)"
+hasnt 'not rewritten' 'default=a b' "$(config)"
+
 # A v2 config's implicit default is pinned in the file when a second profile
 # arrives, as a lone v3 profile's is.
 write_config 'dir=none' 'flags=--v2'
