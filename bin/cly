@@ -32,8 +32,15 @@
 # of key=value lines is not worth a dependency on any of them. The session
 # lists are read the same way — from each agent's own index file, never from
 # the transcripts, which cost a disk open each and can number in the hundreds.
+# That takes bash 4.2 or later (associative arrays, printf's %()T): every
+# Linux, Git for Windows and MSYS2 has one; macOS ships 3.2 and needs brew's.
 
 set -u
+
+if [ "${BASH_VERSINFO[0]}" -lt 4 ] || { [ "${BASH_VERSINFO[0]}" = 4 ] && [ "${BASH_VERSINFO[1]}" -lt 2 ]; }; then
+    echo "cly: needs bash 4.2 or later, and this is bash $BASH_VERSION" >&2
+    exit 2
+fi
 
 CLY_VERSION=4.0.0
 
@@ -67,6 +74,7 @@ cfg_legacy=0
 cfg_legacy_dir=''
 cfg_legacy_flags=''
 cfg_legacy_has_flags=0
+cfg_default_synth=0
 
 # The keys of the one profile being asked about. Which one that is is known
 # before the file is read, so a single pass can both list every name and pick
@@ -138,7 +146,7 @@ cly_config_legacy_fixup() {
         *" claude "*) ;;
         *) cfg_profiles="claude${cfg_profiles:+ $cfg_profiles}" ;;
     esac
-    [ -n "$cfg_default" ] || cfg_default=claude
+    [ -n "$cfg_default" ] || { cfg_default=claude; cfg_default_synth=1; }
     [ "$cly_want_profile" = claude ] || return 0
     [ "$prof_has_section" = 1 ] && return 0
     prof_has_section=1
@@ -201,8 +209,9 @@ cly_config_mkdir() {
 # Write one profile where it already sits, or at the end if it is new, and
 # leave every other line — comments, other profiles, anything hand-added —
 # exactly where it was. The profile's own lines that setup does not ask about
-# (kind, env, anything newer than this script) are kept in place too; a kind
-# is replaced only when a new one is given.
+# (kind, env, anything newer than this script) are kept in place too. A KIND
+# replaces the old one; an empty KIND keeps it; a KIND of - drops it, for when
+# the executable it described has been changed.
 cly_config_put_profile() {  # NAME BIN FLAGS DIR [KIND]
     local name=$1 bin=$2 flags=$3 dir=$4 kind=${5:-} f line rest key wrote=0
     local -a out=()
@@ -217,7 +226,7 @@ cly_config_put_profile() {  # NAME BIN FLAGS DIR [KIND]
                     out+=("profile.$name.bin=$bin")
                     out+=("profile.$name.flags=$flags")
                     out+=("profile.$name.dir=$dir")
-                    [ -n "$kind" ] && out+=("profile.$name.kind=$kind")
+                    case $kind in ''|-) ;; *) out+=("profile.$name.kind=$kind") ;; esac
                 fi
                 rest=${line#profile.$name.}
                 key=${rest%%=*}
@@ -234,7 +243,7 @@ cly_config_put_profile() {  # NAME BIN FLAGS DIR [KIND]
         out+=("profile.$name.bin=$bin")
         out+=("profile.$name.flags=$flags")
         out+=("profile.$name.dir=$dir")
-        [ -n "$kind" ] && out+=("profile.$name.kind=$kind")
+        case $kind in ''|-) ;; *) out+=("profile.$name.kind=$kind") ;; esac
     fi
     printf '%s\n' "${out[@]}" > "$f"
 }
@@ -263,9 +272,10 @@ cly_config_put_default() {  # NAME
 }
 
 # Called before a *new* profile is added: if the one already there was the
-# default only by being alone, say so in the file before it stops being alone.
+# default only by being alone — or only by being the v2 lines — say so in the
+# file before it stops being alone.
 cly_pin_implicit_default() {  # NAME-BEING-ADDED
-    [ -z "$cfg_default" ] || return 0
+    [ -z "$cfg_default" ] || [ "$cfg_default_synth" = 1 ] || return 0
     [ -n "$cfg_profiles" ] || return 0
     case " $cfg_profiles " in *" $1 "*) return 0 ;; esac
     case $cfg_profiles in *' '*) return 0 ;; esac
@@ -277,7 +287,9 @@ cly_pin_implicit_default() {  # NAME-BEING-ADDED
 
 # C:\Users\me\claude → /c/Users/me/claude, without leaving the shell. Enough
 # for comparing and displaying paths; the launch itself goes through
-# cly_to_posix, which asks cygpath when there is one.
+# cly_to_posix, which asks cygpath when there is one. The drive letter is
+# lowercased because /C/Users and /c/Users are the same directory and $HOME
+# spells it in lowercase, which is what lets a session's directory show as ~.
 posix=''
 cly_win_to_posix() {  # PATH → posix
     local p=$1 drive rest
@@ -460,6 +472,14 @@ lines=()
 jv=''
 epoch=0
 
+# How many sessions are shown, and how many files a store without an index
+# is allowed to open for them. CLY_ROWS, when it is a number.
+cly_rows=30
+cly_rows_setting() {
+    cly_rows=${CLY_ROWS:-30}
+    case $cly_rows in ''|*[!0-9]*|0) cly_rows=30 ;; esac
+}
+
 # Split FILE into lines[]: a whole-file read, no loop of reads. Globbing is
 # off for the split because a prompt may well contain a *.
 cly_read_lines() {  # FILE
@@ -488,7 +508,10 @@ cly_json_unescape() {  # TEXT → jv
 }
 
 # 2026-08-25T07:50:31.238Z → seconds since the epoch, in the shell. Days from
-# civil date after Howard Hinnant; 10# because 08 is not octal.
+# civil date after Howard Hinnant; 10# because 08 is not octal. The timestamp
+# is taken as UTC whatever follows the seconds: every store read here writes
+# a Z, and an offset would only shift an age by hours. Honour it here if a
+# store starts writing one.
 cly_iso_epoch() {  # ISO → epoch
     local s=$1 y m d H M S era yoe doy doe days
     case $s in
@@ -524,9 +547,20 @@ cly_epoch() {  # TIMESTAMP → epoch
 # only hold the key's name behind a backslash. Pretty-printed JSON has a space
 # after the colon; callers close it first (line=${line//\": /\":}).
 cly_json_str() {  # KEY LINE → jv; 1 when the key is not there
-    jv=${2##*\"$1\":\"}
-    [ "$jv" != "$2" ] || { jv=''; return 1; }
-    jv=${jv%%\"*}
+    local rest run
+    rest=${2##*\"$1\":\"}
+    [ "$rest" != "$2" ] || { jv=''; return 1; }
+    jv=''
+    # Up to the first quote that is not escaped: an odd run of backslashes
+    # before a quote means the quote is part of the text.
+    while :; do
+        jv+=${rest%%\"*}
+        [ "${rest%%\"*}" != "$rest" ] || break
+        rest=${rest#*\"}
+        run=${jv##*[!\\]}
+        [ $(( ${#run} % 2 )) = 1 ] || break
+        jv+=\"
+    done
 }
 
 # The same for a number.
@@ -660,7 +694,7 @@ cly_sessions_gemini() {
             cly_json_unescape "$dir"; slugdir[$slug]=$jv
         done
     fi
-    cly_newest_by_name "${CLY_ROWS:-30}" "${files[@]}"
+    cly_newest_by_name "$cly_rows" "${files[@]}"
     for f in "${newest[@]}"; do
         sid=''; ts=''; start=''; text=''; user=0; i=0
         while IFS= read -r line && [ "$i" -lt 60 ]; do
@@ -729,7 +763,7 @@ cly_sessions_kimi() {
         done
     fi
     n=${#ids[@]}
-    i=$(( n - 2 * ${CLY_ROWS:-30} )); [ "$i" -gt 0 ] || i=0
+    i=$(( n - 2 * cly_rows )); [ "$i" -gt 0 ] || i=0
     for sid in "${ids[@]:$i}"; do
         [ -z "${dead[$sid]+x}" ] || continue
         f=${dir[$sid]}/state.json
@@ -1006,15 +1040,16 @@ cly_no_answer() {
 # again — and the default= line pointing at it takes the whole config with it.
 cly_is_valid_name() {  # NAME
     case $1 in
-        ''|*[!A-Za-z0-9_-]*) return 1 ;;
+        ''|-*|*[!A-Za-z0-9_-]*) return 1 ;;
     esac
     return 0
 }
 
 cly_name_error() {  # NAME
     echo "cly: '$1' cannot be a profile name" >&2
-    echo "cly: letters, digits, dash and underscore only — a dot or an = would split" >&2
-    echo "cly: the config line the name is written into, and it could never be read back" >&2
+    echo "cly: letters, digits, dash and underscore only, and not a dash first — a dot or" >&2
+    echo "cly: an = would split the config line the name is written into, and a leading" >&2
+    echo "cly: dash would make it one of cly's options, so it could never be launched" >&2
 }
 
 # How a configured directory reads at a prompt.
@@ -1077,9 +1112,12 @@ cly_setup_profile() {  # NAME [WHY]
                     return 2 ;;
             esac
         fi
-        # A kind from the catalog only holds while the executable is the one
-        # it was written for.
-        [ "$bin" = "$dbin" ] || kind=''
+        # A kind only holds while the executable is the one it described:
+        # from the catalog, or from the profile as it was.
+        if [ "$bin" != "$dbin" ]; then
+            kind=''
+            [ "$prof_has_section" = 1 ] && [ -n "$prof_kind" ] && kind=-
+        fi
         echo
     fi
 
@@ -1137,6 +1175,7 @@ cly_load_profile() {  # NAME
     prof_has_section=0; prof_has_flags=0; prof_has_dir=0
     cfg_exists=0; cfg_default=''; cfg_profiles=''; cfg_real_profiles=''
     cfg_legacy=0; cfg_legacy_dir=''; cfg_legacy_flags=''; cfg_legacy_has_flags=0
+    cfg_default_synth=0
     cly_want_profile=$1
     cly_config_load
     cly_config_legacy_fixup
@@ -1210,6 +1249,7 @@ cly_cmd_init() {  # [NAME]
     local name=$1 reply
     if [ -n "$name" ]; then
         cly_is_reserved "$name" && { cly_reserved_error "$name"; return 2; }
+        cly_is_valid_name "$name" || { cly_name_error "$name"; return 2; }
         cly_pin_implicit_default "$name" || return 1
         # Load it first: setup offers the current values, so Enter keeps them.
         cly_load_profile "$name"
@@ -1529,13 +1569,13 @@ cly_screen_pick() {  # TITLE HINT HEADER START
         cly_screen_draw "$title" "$hint" "$header" "$cur" "$top" "$query"
         cly_read_key || { cly_screen_leave; return 2; }
         case $key in
-            up|k)    cur=$(( cur - 1 )) ;;
-            down|j)  cur=$(( cur + 1 )) ;;
+            up)      cur=$(( cur - 1 )) ;;
+            down)    cur=$(( cur + 1 )) ;;
             pgup)    cur=$(( cur - avail )) ;;
             pgdn)    cur=$(( cur + avail )) ;;
-            home|g)  cur=0 ;;
-            end|G)   cur=$(( n - 1 )) ;;
-            esc|q)   cly_screen_leave; return 2 ;;
+            home)    cur=0 ;;
+            end)     cur=$(( n - 1 )) ;;
+            esc)     cly_screen_leave; return 2 ;;
             enter)
                 [ "$n" -gt 0 ] || continue
                 picked_index=${scr_match[cur]}
@@ -1545,8 +1585,11 @@ cly_screen_pick() {  # TITLE HINT HEADER START
                 query=${query%?}
                 cly_screen_filter "$query"; cur=0; top=0 ;;
             [0-9])
-                # Digits are a row number; letters are a filter.
-                case $query in ''|*[!0-9]*) query='' ;; esac
+                # Digits are a row number; letters are a filter. One replaces
+                # the other, list and all.
+                case $query in
+                    ''|*[!0-9]*) query=''; cly_screen_filter ''; top=0 ;;
+                esac
                 query="$query$key"
                 cur=$(( 10#$query - 1 ))
                 [ "$cur" -ge 0 ] || cur=0 ;;
@@ -1583,8 +1626,8 @@ cly_menu_pick() {  # DEFAULT-NAME
 # $1 narrows to one kind; $2 = 1 takes the newest without asking.
 cly_pick_session() {  # [KIND] [NO-ASK]
     local kind=${1:-} noask=${2:-0} n rows i more=''
-    rows=${CLY_ROWS:-30}
-    case $rows in ''|*[!0-9]*|0) rows=30 ;; esac
+    cly_rows_setting
+    rows=$cly_rows
     cly_sessions_all "$kind"
     n=${#ses_rows[@]}
     if [ "$n" = 0 ]; then
@@ -1751,6 +1794,7 @@ cly_main() {
             # No profile of that kind: the agent itself, with no standing flags.
             cly_load_profile "$row_kind"
             prof_bin=$row_kind; prof_flags=''; prof_has_flags=1; prof_kind=$row_kind
+            prof_env=''; prof_dir=''; prof_has_dir=0
             cly_resolve "$row_kind"
             if ! command -v "$res_bin" >/dev/null 2>&1; then
                 echo "cly: that session is $row_kind's, and there is no $row_kind on your PATH" >&2

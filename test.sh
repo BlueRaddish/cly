@@ -265,6 +265,15 @@ has  'an empty answer means launch here' 'profile.claude.dir=none' "$(config)"
 out=$(run .)
 has  'the default is still the first one' 'ARG=--search' "$out"
 
+# A v2 config's implicit default is pinned in the file when a second profile
+# arrives, as a lone v3 profile's is.
+write_config 'dir=none' 'flags=--v2'
+out=$(ask '
+none
+
+' init codex)
+has  'a second profile beside v2 lines pins the v2 default' 'default=claude' "$(config)"
+
 # The claude profile is offered Claude Code's flags; nothing else is.
 reset_config
 out=$(ask '
@@ -611,6 +620,20 @@ has  'cly init keeps env=' 'profile.one.env=CLY_T_A=1' "$(config)"
 has  'and the comment after them' '# a note' "$(config)"
 eq   'and writes the kind once' 1 "$(config | grep -c 'profile.one.kind=')"
 
+write_config 'default=one' "profile.one.bin=$stub" 'profile.one.kind=claude'
+out=$(ask "$work/bin/codex
+none
+
+" init one)
+hasnt 'a changed executable takes the old kind with it' 'profile.one.kind=' "$(config)"
+write_config 'default=one' "profile.one.bin=$stub"
+out=$(run init 'bad.name'); rc=$?
+eq   'an invalid name at init is refused' 2 "$rc"
+out=$(run init -x); rc=$?
+eq   'so is one that starts with a dash: it would be one of the options' 2 "$rc"
+has  'and the error says so' 'a leading' "$(err)"
+eq   'before anything is written' "$(printf '%s\n' 'default=one' "profile.one.bin=$stub")" "$(config)"
+write_config 'default=one' "profile.one.bin=$stub" 'profile.one.kind=claude' 'profile.one.env=CLY_T_A=1'
 out=$(run config)
 has  'config shows the kind' 'kind        claude — -x adds --dangerously-skip-permissions' "$out"
 has  'config shows the environment' 'environment CLY_T_A=1' "$out"
@@ -640,9 +663,8 @@ has  'a number launches that row' 'ARG=--bb' "$out"
 out=$(ask 'b
 ')
 has  'a name launches that profile' 'ARG=--bb' "$out"
-out=$(ask 'q
-'); rc=$?
-eq   'q picks nothing' 2 "$rc"
+out=$(ask $'\e'); rc=$?
+eq   'Esc picks nothing' 2 "$rc"
 hasnt 'and launches nothing' 'PWD=' "$out"
 out=$(ask '99
 '); rc=$?
@@ -661,7 +683,15 @@ has  'then launches it' 'PWD=' "$out"
 has  'and the profile is now there' 'profile.claude.bin=claude' "$(config)"
 has  'the default did not move' 'default=a' "$(config)"
 
-# Picking one that is not installed prints how to get it.
+# Picking one that is not installed prints how to get it. qwen, gemini and
+# kimi start with letters a picker might have kept for itself; none is.
+out=$(ask 'qwen
+'); rc=$?
+eq   'a name starting with q can be typed' 2 "$rc"
+has  'and is the one picked' 'qwen-code' "$(err)"
+out=$(ask 'kimi
+'); rc=$?
+has  'so can one starting with k' 'kimi-code' "$(err)"
 out=$(ask 'gemini
 '); rc=$?
 eq   'a tool that is not installed exits 2' 2 "$rc"
@@ -732,7 +762,7 @@ g2=g2g2g2g2-1111-2222-3333-444444444444
 mkdir -p "$stores/gemini/tmp/proj-a/chats" "$stores/gemini/tmp/other/chats"
 printf '%s\n' \
   '{"sessionId":"'$g1'","projectHash":"abc","startTime":"'$(iso $((now - 7200)))'","lastUpdated":"'$(iso $((now - 7000)))'","kind":"main"}' \
-  '{"id":"m1","timestamp":"x","type":"user","content":[{"text":"Gemini asks a question"}]}' \
+  '{"id":"m1","timestamp":"x","type":"user","content":[{"text":"Gemini asks a \"quoted\" question"}]}' \
   > "$stores/gemini/tmp/proj-a/chats/session-2026-09-01T10-00-${g1:0:8}.jsonl"
 printf '%s\n' "$proja" > "$stores/gemini/tmp/proj-a/.project_root"
 printf '%s\n' '{"sessionId":"sub","kind":"subagent","lastUpdated":"'$(iso "$now")'"}' \
@@ -779,7 +809,7 @@ hasnt 'a session whose transcript is gone is not offered' 'purged' "$out"
 hasnt 'a codex session without its rollout is not offered' 'no rollout' "$out"
 has  'a codex thread is shown by its latest name' 'named thread' "$out"
 hasnt 'not an older one' 'first name' "$out"
-has  'gemini reads the first user message' 'Gemini asks a question' "$out"
+has  'gemini reads the first user message, escaped quotes and all' 'Gemini asks a "quoted" question' "$out"
 has  'and the legacy one-object file' 'Legacy gemini session' "$out"
 hasnt 'a subagent transcript is not a session' 'subagent' "$out"
 has  'kimi shows the title' 'Kimi fixes the build' "$out"
@@ -800,6 +830,9 @@ write_config 'default=oc' "profile.oc.bin=$stub" 'profile.oc.kind=opencode'
 out=$(run -r oc); rc=$?
 eq   '-r on a kind whose sessions cly cannot read exits 2' 2 "$rc"
 has  'and says which kinds it can' 'claude codex gemini kimi' "$(err)"
+out=$(CLY_ROWS=abc run -r); rc=$?
+eq   'a CLY_ROWS that is not a number is ignored' 2 "$rc"
+has  'and the list is whole' 'Kimi fixes the build' "$out"
 out=$(CLY_ROWS=2 run -r)
 has  'CLY_ROWS caps the list' '2 of ' "$out"
 hasnt 'at that many rows' '   3  ' "$out"
@@ -816,6 +849,9 @@ has  'and says what it is doing' "resuming claude session ${c1:0:8} in $proja" "
 out=$(ask '3
 ' -r)
 has  'a number resumes that row' "ARG=$x1" "$out"
+out=$(ask 'kimi3
+' -r)
+has  'a number typed after letters starts over from the full list' "ARG=$x1" "$out"
 has  'by the profile of its kind' 'ARG=--codexy' "$out"
 has  'with its own resume words' 'ARG=resume' "$out"
 has  'in the directory its rollout names' "PWD=$projb" "$out"
@@ -841,13 +877,21 @@ has  'the legacy gemini session finds its directory in projects.json' "PWD=$proj
 out=$(ask '9
 ' -r)
 has  'a number past the end lands on the last row' "ARG=$g2" "$out"
-out=$(ask 'q
-' -r); rc=$?
-eq   'q resumes nothing' 2 "$rc"
+out=$(ask $'\e' -r); rc=$?
+eq   'Esc resumes nothing' 2 "$rc"
 hasnt 'and launches nothing' 'PWD=' "$out"
 
 out=$(run -c)
 has  '-c resumes the newest without asking' "ARG=$c1" "$out"
+write_config 'default=one' "profile.one.bin=$stub" 'profile.one.kind=claude' \
+             'profile.codex.bin=ollama' 'profile.codex.kind=claude' 'profile.codex.env=CLY_T_A=leak' "profile.codex.dir=$projb"
+out=$(run -c codex)
+has  'the bare agent resumes a kind no profile has' 'ARG=resume' "$out"
+hasnt 'without the env of a profile that merely shares its name' 'ENV CLY_T_A=leak' "$out"
+has  'and in the session'"'"'s own directory' "PWD=$projb" "$out"
+write_config 'default=one' "profile.one.bin=$stub" 'profile.one.flags=--standing' 'profile.one.kind=claude' \
+             "profile.two.bin=$stub" 'profile.two.flags=--codexy' 'profile.two.kind=codex'
+
 hasnt 'and shows no table' 'which session' "$out"
 out=$(run -x -c)
 args=$(printf '%s\n' "$out" | grep '^ARG=' | tr '\n' ' ')
