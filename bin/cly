@@ -1575,10 +1575,11 @@ cly_screen_leave() {
 # picked_bypass is 1 when it was taken with x rather than Enter. Returns 2
 # with nothing picked. START is the row to begin on. Keys, after Claude
 # Code's own picker: arrows and the paging keys move, Enter takes the row,
-# / starts a search that letters then type into (Esc clears it), digits go to
-# a row by number, x takes the row with the agent's prompts skipped, Esc
-# leaves. Outside a search, letters do nothing — so nothing typed by accident
-# is a command.
+# / starts a search that letters then type into, digits go to a row by number,
+# x takes the row with the agent's prompts skipped. Esc steps back one level:
+# out of the search (the list stays as the search left it, so x and a number
+# work on it), then the search is cleared, then the screen is left. Outside a
+# search, letters do nothing — so nothing typed by accident is a command.
 picked_index=-1
 picked_bypass=0
 cly_screen_pick() {  # TITLE HINT HEADER START
@@ -1600,11 +1601,11 @@ cly_screen_pick() {  # TITLE HINT HEADER START
         [ "$cur" -lt $(( top + avail )) ] || top=$(( cur - avail + 1 ))
         [ "$top" -ge 0 ] || top=0
         if [ "$mode" = search ]; then
-            cly_screen_draw "$title" 'type to search · Backspace · Enter take the row · Esc clear the search' "$header" "$cur" "$top" "/$query"
+            cly_screen_draw "$title" 'type to search · Backspace · Enter take the row · Esc back to the list' "$header" "$cur" "$top" "/$query"
         elif [ -n "$jump" ]; then
             cly_screen_draw "$title" "$hint" "$header" "$cur" "$top" "row $jump"
         else
-            cly_screen_draw "$title" "$hint" "$header" "$cur" "$top" ''
+            cly_screen_draw "$title" "$hint" "$header" "$cur" "$top" "${query:+/$query}"
         fi
         cly_read_key || { cly_screen_leave; return 2; }
         case $key in
@@ -1623,14 +1624,16 @@ cly_screen_pick() {  # TITLE HINT HEADER START
         esac
         if [ "$mode" = search ]; then
             case $key in
-                esc) query=''; mode=''; cly_screen_filter ''; cur=0; top=0 ;;
+                esc) mode='' ;;
                 bs)  query=${query%?}; cly_screen_filter "$query"; cur=0; top=0 ;;
                 ?)   query="$query$key"; cly_screen_filter "$query"; cur=0; top=0 ;;
             esac
             continue
         fi
         case $key in
-            esc)  cly_screen_leave; return 2 ;;
+            esc)
+                if [ -n "$query" ]; then query=''; cly_screen_filter ''; cur=0; top=0
+                else cly_screen_leave; return 2; fi ;;
             /)    mode=search; jump='' ;;
             x|X)
                 [ "$n" -gt 0 ] || continue

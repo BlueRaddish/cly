@@ -695,6 +695,9 @@ has  'and the standing flags' 'ARG=--aa' "$out"
 out=$(ask '2x')
 has  'a number then x does the same for that row' 'ARG=--dangerously-bypass-approvals-and-sandbox' "$out"
 has  'with its flags' 'ARG=--bb' "$out"
+out=$(ask $'/b\ex')
+has  'a search, Esc, then x takes the row the search found' 'ARG=--bb' "$out"
+has  'skipping prompts' 'ARG=--dangerously-bypass-approvals-and-sandbox' "$out"
 out=$(ask $'\e'); rc=$?
 eq   'Esc picks nothing' 2 "$rc"
 hasnt 'and launches nothing' 'PWD=' "$out"
@@ -881,8 +884,13 @@ has  'and says what it is doing' "resuming claude session ${c1:0:8} in $proja" "
 out=$(ask '3
 ' -r)
 has  'a number resumes that row' "ARG=$x1" "$out"
-out=$(ask $'/kimi\e3\n' -r)
-has  'Esc clears a search, and a number then goes to that row of the full list' "ARG=$x1" "$out"
+out=$(ask $'/kimi\e\e3\n' -r)
+has  'Esc twice leaves the search and clears it; a number then goes to that row of the full list' "ARG=$x1" "$out"
+out=$(ask $'/codex\ex' -r)
+has  'Esc once keeps the list as the search left it, so x takes its row' "ARG=$x1" "$out"
+has  'with the prompts skipped' 'ARG=--dangerously-bypass-approvals-and-sandbox' "$out"
+out=$(ask $'/codex\e\e\e' -r); rc=$?
+eq   'a third Esc leaves the screen' 2 "$rc"
 out=$(ask 'x' -r)
 has  'x resumes the row in hand with its prompts skipped' 'ARG=--dangerously-skip-permissions' "$out"
 has  'the newest one' "ARG=$c1" "$out"
