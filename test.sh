@@ -629,7 +629,7 @@ hasnt 'and launches nothing' 'PWD=' "$out"
 out=$(ask '
 ')
 has  'with one, it is the menu' 'which agent?' "$out"
-has  'the profiles come first' '   1  a         Claude Code' "$out"
+has  'the profiles come first' '1  a         Claude Code' "$out"
 has  'the default is marked' '(default)' "$out"
 has  'the catalog follows' 'gemini    Gemini CLI   not installed: npm install -g @google/gemini-cli' "$out"
 has  'installed tools without a profile say so' 'claude    Claude Code  installed, no profile yet' "$out"
@@ -646,7 +646,8 @@ eq   'q picks nothing' 2 "$rc"
 hasnt 'and launches nothing' 'PWD=' "$out"
 out=$(ask '99
 '); rc=$?
-eq   'a row that is not there exits 2' 2 "$rc"
+eq   'a number past the end lands on the last row, meta, which needs ollama' 2 "$rc"
+has  'and says so' 'ollama' "$(err)"
 out=$(ask ''); rc=$?
 eq   'no answer at all exits 2' 2 "$rc"
 
@@ -838,8 +839,8 @@ out=$(ask '6
 ' -r)
 has  'the legacy gemini session finds its directory in projects.json' "PWD=$projb" "$out"
 out=$(ask '9
-' -r); rc=$?
-eq   'a row that is not there exits 2' 2 "$rc"
+' -r)
+has  'a number past the end lands on the last row' "ARG=$g2" "$out"
 out=$(ask 'q
 ' -r); rc=$?
 eq   'q resumes nothing' 2 "$rc"
