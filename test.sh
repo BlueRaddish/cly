@@ -883,16 +883,17 @@ hasnt 'and launches nothing' 'PWD=' "$out"
 
 out=$(run -c)
 has  '-c resumes the newest without asking' "ARG=$c1" "$out"
+hasnt 'and shows no table' 'which session' "$out"
 write_config 'default=one' "profile.one.bin=$stub" 'profile.one.kind=claude' \
              'profile.codex.bin=ollama' 'profile.codex.kind=claude' 'profile.codex.env=CLY_T_A=leak' "profile.codex.dir=$projb"
-out=$(run -c codex)
+out=$(ask '3
+' -r)
 has  'the bare agent resumes a kind no profile has' 'ARG=resume' "$out"
 hasnt 'without the env of a profile that merely shares its name' 'ENV CLY_T_A=leak' "$out"
 has  'and in the session'"'"'s own directory' "PWD=$projb" "$out"
 write_config 'default=one' "profile.one.bin=$stub" 'profile.one.flags=--standing' 'profile.one.kind=claude' \
              "profile.two.bin=$stub" 'profile.two.flags=--codexy' 'profile.two.kind=codex'
 
-hasnt 'and shows no table' 'which session' "$out"
 out=$(run -x -c)
 args=$(printf '%s\n' "$out" | grep '^ARG=' | tr '\n' ' ')
 eq   '-x goes between the standing flags and the resume words' "ARG=--standing ARG=--dangerously-skip-permissions ARG=--resume ARG=$c1 " "$args"
