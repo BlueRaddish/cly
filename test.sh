@@ -872,7 +872,7 @@ has  'and says which kinds it can' 'claude codex gemini kimi' "$(err)"
 out=$(CLY_ROWS=abc run -r); rc=$?
 eq   'a CLY_ROWS that is not a number is ignored' 2 "$rc"
 has  'and the list is whole' 'Kimi fixes the build' "$out"
-out=$(CLY_ROWS=2 run -r)
+out=$(CLY_ROWS=1 run -r)
 has  'CLY_ROWS does not cut the list' 'named by hand' "$out"
 hasnt 'only the files opened: the oldest gemini session is not read' 'Legacy gemini session' "$out"
 

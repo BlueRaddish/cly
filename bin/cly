@@ -477,12 +477,12 @@ lines=()
 jv=''
 epoch=0
 
-# How many sessions are shown, and how many files a store without an index
-# is allowed to open for them. CLY_ROWS, when it is a number.
-cly_rows=30
+# How many rows the screen shows at once — CLY_ROWS, when it is a number —
+# and, twice that, how many files a store without an index may open.
+cly_rows=15
 cly_rows_setting() {
-    cly_rows=${CLY_ROWS:-30}
-    case $cly_rows in ''|*[!0-9]*|0) cly_rows=30 ;; esac
+    cly_rows=${CLY_ROWS:-15}
+    case $cly_rows in ''|*[!0-9]*|0) cly_rows=15 ;; esac
 }
 
 # Split FILE into lines[]: a whole-file read, no loop of reads. Globbing is
@@ -706,7 +706,7 @@ cly_sessions_gemini() {
             cly_json_unescape "$dir"; slugdir[$slug]=$jv
         done
     fi
-    cly_newest_by_name "$cly_rows" "${files[@]}"
+    cly_newest_by_name $(( 2 * cly_rows )) "${files[@]}"
     for f in "${newest[@]}"; do
         sid=''; ts=''; start=''; text=''; user=0; i=0
         while IFS= read -r line && [ "$i" -lt 60 ]; do
@@ -1036,8 +1036,8 @@ ENVIRONMENT
   CLY_FLAGS   flags, overriding the profile; empty means none
   CLY_BIN     the executable, overriding the profile
   CLY_CONFIG  config file location (default: ~/.config/cly/config)
-  CLY_ROWS    files -r opens per store that has no index: the newest N
-              Gemini and Kimi sessions, N Codex directories (default: 30)
+  CLY_ROWS    rows the screen shows at once (default: 15); twice that many
+              files are opened per store that has no index
 
 FILES
   ~/.config/cly/config      the profiles, and which one the default is
@@ -1467,6 +1467,7 @@ scr_rows=24
 scr_cols=80
 scr_live=0       # 1 when the screen is a terminal that can be drawn on
 scr_drawn=0      # lines the last frame took, to move back over
+scr_view=15      # rows shown at once: CLY_ROWS, within the terminal
 picked_index=-1
 key=''
 
@@ -1539,9 +1540,13 @@ cly_read_key() {
     esac
 }
 
-# TEXT cut to fit WIDTH columns → clipped. Anything past Hangul Jamo counts
-# double, which is what CJK and most emoji take on a terminal.
+# TEXT cut to fit WIDTH columns → clipped, and clipw, the columns it takes.
+# Anything past Hangul Jamo counts double, which is what CJK and most emoji
+# take on a terminal — and padding by columns rather than characters is what
+# keeps a highlighted row with Korean in it from wrapping onto a second line
+# and throwing every later cursor move off by one.
 clipped=''
+clipw=0
 cly_clip() {  # TEXT WIDTH
     local s=$1 w=$2 i n ch cp k cw=0
     case $s in
@@ -1553,8 +1558,9 @@ cly_clip() {  # TEXT WIDTH
                 if [ "$cp" -ge 4352 ]; then k=2; else k=1; fi
                 [ $(( cw + k )) -le "$w" ] || break
                 clipped+=$ch; cw=$(( cw + k ))
-            done ;;
-        *) clipped=${s:0:$w} ;;
+            done
+            clipw=$cw ;;
+        *) clipped=${s:0:$w}; clipw=${#clipped} ;;
     esac
 }
 
@@ -1609,7 +1615,7 @@ cly_screen_rowtext() {  # J CUR
         return 0
     fi
     if [ "$j" = "$cur" ]; then
-        printf -v pad '%*s' $(( w - ${#clipped} )) ''
+        printf -v pad '%*s' $(( w - clipw )) ''
         rowtext=$'\e[7;1m'"> ${clipped#  }$pad"$'\e[0m'
     elif [ "${scr_dim[i]:-0}" = 1 ]; then
         rowtext=$'\e[2m'"$clipped"$'\e[0m'
@@ -1630,7 +1636,7 @@ cly_screen_titletext() {  # TITLE CUR N NOTE
     status="$(( $3 > 0 ? $2 + 1 : 0 ))/$3"
     [ -z "$4" ] || status="$4  $status"
     cly_clip "$1" $(( w - ${#status} - 2 ))
-    printf -v pad '%*s' $(( w - ${#clipped} - ${#status} )) ''
+    printf -v pad '%*s' $(( w - clipw - ${#status} )) ''
     if [ "$scr_live" = 1 ]; then titletext=$'\e[1m'"$clipped"$'\e[0m'"$pad"$'\e[2m'"$status"$'\e[0m'
     else titletext="$clipped$pad$status"; fi
 }
@@ -1645,8 +1651,7 @@ cly_screen_draw() {  # TITLE HINT HEADER CUR TOP NOTE
     local title=$1 hint=$2 header=$3 cur=$4 top=$5 note=$6
     local out='' j n avail eol='' lines=0 w
     n=${#scr_match[@]}
-    avail=$(( scr_rows - 5 ))
-    [ "$avail" -ge 1 ] || avail=1
+    avail=$scr_view
     w=$(( scr_cols - 1 ))
     if [ "$scr_live" = 1 ]; then
         eol=$'\e[K'
@@ -1687,6 +1692,10 @@ cly_screen_open() {
     [ -t 0 ] && [ -t 1 ] && scr_live=1
     scr_drawn=0
     cly_screen_size
+    cly_rows_setting
+    scr_view=$cly_rows
+    [ "$scr_view" -le $(( scr_rows - 5 )) ] || scr_view=$(( scr_rows - 5 ))
+    [ "$scr_view" -ge 1 ] || scr_view=1
 }
 
 # Leave the way Claude Code's picker leaves: the frame is wiped and the cursor
@@ -1727,7 +1736,7 @@ cly_screen_pick() {  # TITLE HINT HEADER START
     cly_screen_filter ''
     while :; do
         n=${#scr_match[@]}
-        avail=$(( scr_rows - 5 )); [ "$avail" -ge 1 ] || avail=1
+        avail=$scr_view
         [ "$cur" -lt "$n" ] || cur=$(( n - 1 ))
         [ "$cur" -ge 0 ] || cur=0
         [ "$cur" -ge "$top" ] || top=$cur
@@ -1851,7 +1860,7 @@ cly_pick_session() {  # [KIND] [NO-ASK]
         return 0
     fi
     cly_sort_rows
-    for ((i = 0; i < cly_rows && i < n; i++)); do
+    for ((i = 0; i < 2 * cly_rows && i < n; i++)); do
         cly_row_fields "${ses_rows[i]}"
         [ -n "$row_cwd" ] && continue
         cly_session_cwd "$row_kind" "$row_id"; row_cwd=$jv
