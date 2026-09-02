@@ -820,6 +820,23 @@ cly_sessions_all() {  # [KIND]
     done
 }
 
+# Newest first, all of them. The listers append each store oldest first, so
+# the reverse is nearly the order wanted, and an insertion sort on a nearly
+# sorted list is linear — no external sort, none needed.
+cly_sort_rows() {
+    local n=${#ses_rows[@]} i j k key
+    local -a r=()
+    for ((i = n - 1; i >= 0; i--)); do r+=("${ses_rows[i]}"); done
+    for ((i = 1; i < n; i++)); do
+        key=${r[i]}; k=${key%%"$CLY_US"*}; j=$(( i - 1 ))
+        while [ "$j" -ge 0 ] && [ "${r[j]%%"$CLY_US"*}" -lt "$k" ]; do
+            r[j + 1]=${r[j]}; j=$(( j - 1 ))
+        done
+        r[j + 1]=$key
+    done
+    ses_rows=(${r[@]+"${r[@]}"})
+}
+
 # Bring the N newest rows to the front, in order. Selection, not a full sort:
 # the rows behind them are never shown.
 cly_top_rows() {  # N
@@ -1012,7 +1029,8 @@ ENVIRONMENT
   CLY_FLAGS   flags, overriding the profile; empty means none
   CLY_BIN     the executable, overriding the profile
   CLY_CONFIG  config file location (default: ~/.config/cly/config)
-  CLY_ROWS    how many sessions -r lists (default: 30)
+  CLY_ROWS    files -r opens per store that has no index: the newest N
+              Gemini and Kimi sessions, N Codex directories (default: 30)
 
 FILES
   ~/.config/cly/config      the profiles, and which one the default is
@@ -1449,17 +1467,28 @@ key=''
 # far corner, ask where it is, put it back. Only with a real terminal on both
 # ends — under CLY_ASSUME_TTY the reply would be read out of the answers.
 cly_screen_size() {
-    local reply=''
+    local reply='' sz=''
     scr_rows=${LINES:-24}; scr_cols=${COLUMNS:-80}
     [ "$scr_live" = 1 ] || return 0
     printf '\e7\e[999;999H\e[6n\e8'
-    IFS= read -rs -d R -t 0.3 reply || return 0
-    reply=${reply##*\[}
-    case $reply in
-        [0-9]*';'[0-9]*) scr_rows=${reply%%;*}; scr_cols=${reply#*;} ;;
-    esac
+    if IFS= read -rs -d R -t 0.5 reply; then
+        reply=${reply##*\[}
+        case $reply in
+            [0-9]*';'[0-9]*) scr_rows=${reply%%;*}; scr_cols=${reply#*;} ;;
+        esac
+    elif command -v stty >/dev/null 2>&1; then
+        # A terminal that does not answer: ask the tty driver instead. The
+        # one fork in the screen, and only on that terminal.
+        sz=$(stty size 2>/dev/null) || sz=''
+        case $sz in
+            [0-9]*' '[0-9]*) scr_rows=${sz%% *}; scr_cols=${sz#* } ;;
+        esac
+    fi
     [ "$scr_rows" -ge 8 ] || scr_rows=8
     [ "$scr_cols" -ge 40 ] || scr_cols=40
+    # CLY_DEBUG=FILE appends what the screen found out about the terminal.
+    [ -z "${CLY_DEBUG:-}" ] || printf 'live=%s rows=%s cols=%s reply=[%s] stty=[%s] in=%s out=%s\n' \
+        "$scr_live" "$scr_rows" "$scr_cols" "$reply" "$sz" "$([ -t 0 ] && echo y || echo n)" "$([ -t 1 ] && echo y || echo n)" >> "$CLY_DEBUG"
 }
 
 # One key, named: up down pgup pgdn home end enter esc bs, or the character.
@@ -1559,9 +1588,54 @@ cly_screen_filter() {  # QUERY
     scr_match+=(${rest[@]+"${rest[@]}"})
 }
 
+# Frame line for the row at position J of the match list, with its colours.
+rowtext=''
+cly_screen_rowtext() {  # J CUR
+    local j=$1 cur=$2 i line pad w col
+    w=$(( scr_cols - 1 ))
+    i=${scr_match[j]}
+    printf -v line '  %3s  %s' $(( i + 1 )) "${scr_lines[i]}"
+    cly_clip "$line" "$w"
+    if [ "$scr_live" != 1 ]; then
+        if [ "$j" = "$cur" ]; then rowtext="> ${clipped#  }"; else rowtext=$clipped; fi
+        return 0
+    fi
+    if [ "$j" = "$cur" ]; then
+        printf -v pad '%*s' $(( w - ${#clipped} )) ''
+        rowtext=$'\e[7;1m'"> ${clipped#  }$pad"$'\e[0m'
+    elif [ "${scr_dim[i]:-0}" = 1 ]; then
+        rowtext=$'\e[2m'"$clipped"$'\e[0m'
+    elif [ -n "${scr_tint[i]:-}" ]; then
+        # The number, then the first column in its colour.
+        col=${clipped:0:7}
+        rowtext="$col"$'\e['"${scr_tint[i]}"$'m'"${clipped:7:9}"$'\e[0m'"${clipped:16}"
+    else
+        rowtext=$clipped
+    fi
+}
+
+# The title line: the title, and the note and position at the right edge.
+titletext=''
+cly_screen_titletext() {  # TITLE CUR N NOTE
+    local status pad w
+    w=$(( scr_cols - 1 ))
+    status="$(( $3 > 0 ? $2 + 1 : 0 ))/$3"
+    [ -z "$4" ] || status="$4  $status"
+    cly_clip "$1" $(( w - ${#status} - 2 ))
+    printf -v pad '%*s' $(( w - ${#clipped} - ${#status} )) ''
+    if [ "$scr_live" = 1 ]; then titletext=$'\e[1m'"$clipped"$'\e[0m'"$pad"$'\e[2m'"$status"$'\e[0m'
+    else titletext="$clipped$pad$status"; fi
+}
+
+# Rewrite one line of the frame in place: up to it, print, back down.
+cly_screen_line() {  # LINE-INDEX TEXT
+    local up=$(( scr_drawn - $1 ))
+    printf '\e[%sA\r%s\e[K\e[%sB\r' "$up" "$2" "$up"
+}
+
 cly_screen_draw() {  # TITLE HINT HEADER CUR TOP NOTE
     local title=$1 hint=$2 header=$3 cur=$4 top=$5 note=$6
-    local out='' i j n avail status line pad w eol='' lines=0 col
+    local out='' j n avail eol='' lines=0 w
     n=${#scr_match[@]}
     avail=$(( scr_rows - 5 ))
     [ "$avail" -ge 1 ] || avail=1
@@ -1570,13 +1644,8 @@ cly_screen_draw() {  # TITLE HINT HEADER CUR TOP NOTE
         eol=$'\e[K'
         [ "$scr_drawn" -gt 0 ] && out=$'\e['"$scr_drawn"$'A\r'
     fi
-    status="$(( n > 0 ? cur + 1 : 0 ))/$n"
-    [ -z "$note" ] || status="$note  $status"
-    cly_clip "$title" $(( w - ${#status} - 2 ))
-    printf -v pad '%*s' $(( w - ${#clipped} - ${#status} )) ''
-    if [ "$scr_live" = 1 ]; then out+=$'\e[1m'"$clipped"$'\e[0m'"$pad"$'\e[2m'"$status"$'\e[0m'"$eol"$'\n'
-    else out+="$clipped$pad$status"$'\n'; fi
-    lines=$(( lines + 1 ))
+    cly_screen_titletext "$title" "$cur" "$n" "$note"
+    out+="$titletext$eol"$'\n'; lines=$(( lines + 1 ))
     cly_clip "$hint" "$w"
     if [ "$scr_live" = 1 ]; then out+=$'\e[2m'"$clipped"$'\e[0m'"$eol"$'\n'; else out+="$clipped"$'\n'; fi
     lines=$(( lines + 1 ))
@@ -1588,26 +1657,9 @@ cly_screen_draw() {  # TITLE HINT HEADER CUR TOP NOTE
     fi
     lines=$(( lines + 1 ))
     for ((j = top; j < top + avail && j < n; j++)); do
-        i=${scr_match[j]}
-        printf -v line '  %3s  %s' $(( i + 1 )) "${scr_lines[i]}"
-        cly_clip "$line" "$w"
+        cly_screen_rowtext "$j" "$cur"
+        out+="$rowtext$eol"$'\n'
         lines=$(( lines + 1 ))
-        if [ "$scr_live" != 1 ]; then
-            if [ "$j" = "$cur" ]; then out+="> ${clipped#  }"$'\n'; else out+="$clipped"$'\n'; fi
-            continue
-        fi
-        if [ "$j" = "$cur" ]; then
-            printf -v pad '%*s' $(( w - ${#clipped} )) ''
-            out+=$'\e[7;1m'"> ${clipped#  }$pad"$'\e[0m'"$eol"$'\n'
-        elif [ "${scr_dim[i]:-0}" = 1 ]; then
-            out+=$'\e[2m'"$clipped"$'\e[0m'"$eol"$'\n'
-        elif [ -n "${scr_tint[i]:-}" ]; then
-            # The number, then the first column in its colour.
-            col=${clipped:0:7}
-            out+="$col"$'\e['"${scr_tint[i]}"$'m'"${clipped:7:9}"$'\e[0m'"${clipped:16}$eol"$'\n'
-        else
-            out+="$clipped$eol"$'\n'
-        fi
     done
     if [ "$n" = 0 ]; then out+="  (nothing matches)$eol"$'\n'; lines=$(( lines + 1 )); fi
     [ "$scr_live" = 1 ] && out+=$'\e[J'
@@ -1646,6 +1698,7 @@ picked_index=-1
 picked_bypass=0
 cly_screen_pick() {  # TITLE HINT HEADER START
     local title=$1 hint=$2 header=$3 cur=${4:-0} top=0 query='' jump='' mode='' n avail
+    local note='' hint2 last_top=-1 last_cur=-1 last_n=-1 last_note='' skipped=0
     local LC_ALL=${LC_ALL:-${LANG:-C.UTF-8}}
     picked_index=-1
     picked_bypass=0
@@ -1664,11 +1717,32 @@ cly_screen_pick() {  # TITLE HINT HEADER START
         [ "$cur" -lt $(( top + avail )) ] || top=$(( cur - avail + 1 ))
         [ "$top" -ge 0 ] || top=0
         if [ "$mode" = search ]; then
-            cly_screen_draw "$title" 'type to search · Backspace · Enter take the row · Esc back to the list' "$header" "$cur" "$top" "/$query"
+            note="/$query"; hint2='type to search · Backspace · Enter take the row · Esc back to the list'
         elif [ -n "$jump" ]; then
-            cly_screen_draw "$title" "$hint" "$header" "$cur" "$top" "row $jump"
+            note="row $jump"; hint2=$hint
         else
-            cly_screen_draw "$title" "$hint" "$header" "$cur" "$top" "${query:+/$query}"
+            note=${query:+/$query}; hint2=$hint
+        fi
+        # A held-down arrow queues keys faster than frames draw; while more
+        # input is waiting, apply the key and draw later. Never more than a
+        # few in a row, in case a terminal claims input it does not have.
+        if [ "$scr_live" = 1 ] && [ "$skipped" -lt 8 ] && read -t 0; then
+            skipped=$(( skipped + 1 ))
+        elif [ "$scr_live" = 1 ] && [ "$scr_drawn" -gt 0 ] && [ "$top" = "$last_top" ] \
+                && [ "$n" = "$last_n" ] && [ "$note" = "$last_note" ]; then
+            # Only the bar moved: the two rows and the position, not the frame.
+            skipped=0
+            cly_screen_titletext "$title" "$cur" "$n" "$note"
+            cly_screen_line 0 "$titletext"
+            if [ "$last_cur" != "$cur" ]; then
+                cly_screen_rowtext "$last_cur" "$cur"; cly_screen_line $(( 3 + last_cur - top )) "$rowtext"
+                cly_screen_rowtext "$cur" "$cur";      cly_screen_line $(( 3 + cur - top )) "$rowtext"
+            fi
+            last_cur=$cur
+        else
+            skipped=0
+            cly_screen_draw "$title" "$hint2" "$header" "$cur" "$top" "$note"
+            last_top=$top; last_cur=$cur; last_n=$n; last_note=$note
         fi
         cly_read_key || { cly_screen_leave; return 2; }
         case $key in
@@ -1738,14 +1812,21 @@ cly_menu_pick() {  # DEFAULT-NAME
 # --- resuming ----------------------------------------------------------------
 
 # List the sessions, let one be picked, and hand the row back in row_*.
-# $1 narrows to one kind; $2 = 1 takes the newest without asking.
+# $1 narrows to one kind; $2 = 1 takes the newest without asking. Every
+# session is listed; CLY_ROWS only bounds the files opened for the stores
+# that keep no index, and the Codex directories read before the screen — the
+# rest are read when their row is picked.
 cly_pick_session() {  # [KIND] [NO-ASK]
-    local kind=${1:-} noask=${2:-0} n rows i more=''
+    local kind=${1:-} noask=${2:-0} n i
     cly_rows_setting
-    rows=$cly_rows
+    if [ "$noask" != 1 ] && cly_is_interactive; then
+        cly_screen_open
+        [ "$scr_live" = 1 ] && printf 'cly: reading sessions...\r'
+    fi
     cly_sessions_all "$kind"
     n=${#ses_rows[@]}
     if [ "$n" = 0 ]; then
+        [ "$scr_live" = 1 ] && printf '\e[K'
         echo "cly: no sessions found${kind:+ for $kind}" >&2
         return 2
     fi
@@ -1755,31 +1836,27 @@ cly_pick_session() {  # [KIND] [NO-ASK]
         if [ -z "$row_cwd" ]; then cly_session_cwd "$row_kind" "$row_id"; row_cwd=$jv; fi
         return 0
     fi
-    cly_top_rows "$rows"
-    [ "$rows" -lt "$n" ] || rows=$n
-    for ((i = 0; i < rows; i++)); do
+    cly_sort_rows
+    for ((i = 0; i < cly_rows && i < n; i++)); do
         cly_row_fields "${ses_rows[i]}"
         [ -n "$row_cwd" ] && continue
         cly_session_cwd "$row_kind" "$row_id"; row_cwd=$jv
         ses_rows[i]="$row_epoch$CLY_US$row_kind$CLY_US$row_id$CLY_US$row_cwd$CLY_US$row_title"
     done
-    ses_rows=("${ses_rows[@]:0:$rows}")
-    [ "$rows" -lt "$n" ] && more="$rows of $n · CLY_ROWS=$(( rows * 2 )) shows more"
     if ! cly_is_interactive; then
         echo "cly $CLY_VERSION — which session?${kind:+  ($kind only)}"
         echo
         cly_print_sessions
         echo
-        [ -z "$more" ] || { echo "  $more, 'cly -r NAME' narrows to one agent"; echo; }
         echo "cly: no terminal to pick at — run this in one, or 'cly NAME' with the agent's own resume flag" >&2
         return 2
     fi
-    cly_screen_open
     cly_session_lines
     if cly_screen_pick "cly $CLY_VERSION — which session?${kind:+  ($kind only)}" \
-            "up/down move · Enter resume · x resume skipping prompts · / search · Esc quit${more:+ · $more}" \
+            "up/down move · Enter resume · x resume skipping prompts · / search · Esc quit · $n sessions" \
             "$scr_header" 0; then
         cly_row_fields "${ses_rows[picked_index]}"
+        if [ -z "$row_cwd" ]; then cly_session_cwd "$row_kind" "$row_id"; row_cwd=$jv; fi
         return 0
     fi
     echo "cly: nothing picked" >&2

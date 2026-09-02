@@ -137,7 +137,7 @@ Each kind's store, and what cly reads from it:
 | `kimi` | `~/.kimi-code/session_index.jsonl`, then each session's `state.json` for title, directory and time | `--session ID` |
 | `qwen`, `opencode` | not listed: a per-directory tree that cannot be mapped back to a directory, and a database. `-x` still knows their flags | — |
 
-The transcripts themselves are never read — opening one costs a disk access each and they can number in the hundreds — so the list appears in about a second. `CLY_ROWS` (default 30) caps how many are shown, and bounds how many Gemini and Kimi files are opened.
+The transcripts themselves are never read — opening one costs a disk access each and they can number in the hundreds — so the list appears in about a second, and every session is on it. `CLY_ROWS` (default 30) bounds the files that do get opened: the newest Gemini and Kimi sessions, and the Codex directories read before the screen (the rest are read when their row is picked).
 
 ## Agents
 
@@ -202,7 +202,7 @@ Launch directory, most specific first: `--here` / `--dir`, then `CLY_DIR`, then 
 | `CLY_FLAGS` | — | flags, overriding the profile; empty means none |
 | `CLY_BIN` | — | the executable, overriding the profile |
 | `CLY_CONFIG` | `~/.config/cly/config` | where the config lives |
-| `CLY_ROWS` | `30` | how many sessions `-r` lists |
+| `CLY_ROWS` | `30` | files `-r` opens per store without an index: the newest N |
 | `CLY_BASH` | — | Windows only: the `bash.exe` the shim should use |
 
 The agents' own variables are honoured for their stores: `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME`, `KIMI_CODE_HOME`.

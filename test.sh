@@ -869,8 +869,8 @@ out=$(CLY_ROWS=abc run -r); rc=$?
 eq   'a CLY_ROWS that is not a number is ignored' 2 "$rc"
 has  'and the list is whole' 'Kimi fixes the build' "$out"
 out=$(CLY_ROWS=2 run -r)
-has  'CLY_ROWS caps the list' '2 of ' "$out"
-hasnt 'at that many rows' '   3  ' "$out"
+has  'CLY_ROWS does not cut the list' 'On Windows' "$out"
+hasnt 'only the files opened: the oldest gemini session is not read' 'Legacy gemini session' "$out"
 
 write_config 'default=one' "profile.one.bin=$stub" 'profile.one.flags=--standing' 'profile.one.kind=claude' \
              "profile.two.bin=$stub" 'profile.two.flags=--codexy' 'profile.two.kind=codex'
