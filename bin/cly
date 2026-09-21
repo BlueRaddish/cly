@@ -1249,10 +1249,11 @@ cly_resolve() {  # NAME
 
 # Everything a launch and a resume have in common: the environment, then exec.
 # FLAGS is deliberately unquoted where it is used: it is a list of arguments.
-cly_exec() {  # BIN FLAGS ENV ARG...
-    local bin=$1 flags=$2 env=$3 kv k v n flag remote=0 kimi_auto=0
+cly_exec() {  # BIN FLAGS ENV BYPASS ARG...
+    local bin=$1 flags=$2 env=$3 bypass=$4 kv k v n flag remote=0 kimi_auto=0
+    local remote_resume=0 omitted=0
     local -a launch_flags=()
-    shift 3
+    shift 4
     # shellcheck disable=SC2086
     for kv in $env; do
         k=${kv%%=*}; v=${kv#*=}
@@ -1270,16 +1271,29 @@ cly_exec() {  # BIN FLAGS ENV ARG...
         esac
         export "$k=$v"
     done
+    # A remote Codex resume inherits the server session's permissions. Keep
+    # cly's own bypass separate from native arguments so only our defaults
+    # and -x are suppressed; explicit agent arguments remain untouched.
+    if [ "$res_kind" = codex ] && [ "${1:-}" = resume ]; then
+        case " $flags " in *' --remote-control '*) remote_resume=1 ;; esac
+        if [ "$remote_resume" = 1 ] && [ -n "$bypass" ]; then
+            bypass=''; omitted=1
+        fi
+    fi
     # Kimi's Never Ask mode replaces its older, mutually exclusive YOLO mode.
     # -x must also work on profiles saved before that change.
     if [ "$res_kind" = kimi ]; then
-        for flag in $flags "$@"; do
+        for flag in $flags "$bypass" "$@"; do
             [ "$flag" != --auto ] || kimi_auto=1
         done
     fi
     # Codex remote control is a daemon command, not a TUI flag. Only interpret
     # the marker in standing flags; arguments after the profile stay untouched.
     for flag in $flags; do
+        if [ "$remote_resume" = 1 ] && [ "$flag" = --dangerously-bypass-approvals-and-sandbox ]; then
+            omitted=1
+            continue
+        fi
         if [ "$kimi_auto" = 1 ]; then
             case $flag in --yolo|-y|--yes|--auto-approve) continue ;; esac
         fi
@@ -1296,7 +1310,10 @@ cly_exec() {  # BIN FLAGS ENV ARG...
         }
         launch_flags+=(--remote unix://)
     fi
-    exec "$bin" "${launch_flags[@]}" "$@"
+    if [ "$omitted" = 1 ]; then
+        echo "cly: remote Codex resume keeps the session's permissions; bypass applies to new sessions" >&2
+    fi
+    exec "$bin" "${launch_flags[@]}" ${bypass:+"$bypass"} "$@"
 }
 
 # The one flag -x adds — nothing, when the profile's standing flags already
@@ -2080,7 +2097,7 @@ cly_main() {
         [ -n "$dir" ] && { cd "$dir" || return 1; }
         echo "cly: resuming $row_kind session ${row_id:0:8} in ${dir:-$PWD}" >&2
         # shellcheck disable=SC2086
-        cly_exec "$res_bin" "$res_flags" "$res_env" ${bypass:+"$bypass"} $kind_resume "$row_id" ${agent[@]+"${agent[@]}"}
+        cly_exec "$res_bin" "$res_flags" "$res_env" "$bypass" $kind_resume "$row_id" ${agent[@]+"${agent[@]}"}
     fi
 
     # No first word: the menu, when there is a terminal to show it at; the
@@ -2189,7 +2206,7 @@ cly_main() {
 
     [ -n "$dir" ] && { cd "$dir" || return 1; }
 
-    cly_exec "$res_bin" "$res_flags" "$res_env" ${bypass:+"$bypass"} ${agent[@]+"${agent[@]}"}
+    cly_exec "$res_bin" "$res_flags" "$res_env" "$bypass" ${agent[@]+"${agent[@]}"}
 }
 
 cly_main "$@"

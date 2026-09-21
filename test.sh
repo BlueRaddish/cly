@@ -904,6 +904,22 @@ eq   'a number then x, for codex' "ARG=--codexy ARG=--dangerously-bypass-approva
 has  'by the profile of its kind' 'ARG=--codexy' "$out"
 has  'with its own resume words' 'ARG=resume' "$out"
 has  'in the directory its rollout names' "PWD=$projb" "$out"
+# Both picker entry points must obey the remote resume permission contract.
+write_config 'profile.codex.bin=codex' \
+    'profile.codex.flags=--remote-control --dangerously-bypass-approvals-and-sandbox'
+for choice in plain bypass key continue; do
+    case $choice in
+        plain) out=$(ask $'\n' --resume codex) ;;
+        bypass) out=$(ask $'\n' -x --resume codex) ;;
+        key) out=$(ask x --resume codex) ;;
+        continue) out=$(run -x --continue codex) ;;
+    esac
+    has "$choice remote picker resumes selected session" "ARG=$x1" "$out"
+    has "$choice remote picker keeps remote connection" $'ARG=--remote\nARG=unix://' "$out"
+    hasnt "$choice remote picker omits permission override" 'ARG=--dangerously-bypass-approvals-and-sandbox' "$out"
+done
+write_config 'default=one' "profile.one.bin=$stub" 'profile.one.flags=--standing' 'profile.one.kind=claude' \
+             "profile.two.bin=$stub" 'profile.two.flags=--codexy' 'profile.two.kind=codex'
 out=$(ask '2
 ' -r)
 args=$(printf '%s\n' "$out" | grep '^ARG=' | tr '\n' ' ')
@@ -1042,6 +1058,22 @@ count=$(printf '%s\n' "$out" | grep -c '^ARG=--dangerously-bypass-approvals-and-
 eq 'explicit bypass is not duplicated' 1 "$count"
 out=$(run codex resume test-session)
 has 'native resume reaches connected terminal' $'ARG=resume\nARG=test-session' "$out"
+hasnt 'remote native resume omits standing bypass' 'ARG=--dangerously-bypass-approvals-and-sandbox' "$out"
+has 'remote resume explains retained permissions' "keeps the session's permissions" "$(err)"
+out=$(run -x codex resume test-session)
+hasnt 'remote native resume with -x omits bypass' 'ARG=--dangerously-bypass-approvals-and-sandbox' "$out"
+write_config 'profile.codex.bin=codex' 'profile.codex.flags=--remote-control'
+out=$(run -x codex resume test-session)
+hasnt 'remote resume omits bypass injected by -x' 'ARG=--dangerously-bypass-approvals-and-sandbox' "$out"
+has 'remote resume still connects to daemon' $'ARG=--remote\nARG=unix://' "$out"
+out=$(run codex resume test-session --dangerously-bypass-approvals-and-sandbox)
+has 'explicit native arguments are preserved' $'ARG=test-session\nARG=--dangerously-bypass-approvals-and-sandbox' "$out"
+out=$(CLY_FLAGS='' run -x codex resume test-session)
+has 'local resume retains requested bypass' 'ARG=--dangerously-bypass-approvals-and-sandbox' "$out"
+out=$(run codex 'please resume my work')
+has 'resume in prompt is not a resume command' 'ARG=please resume my work' "$out"
+write_config 'profile.codex.bin=codex' \
+    'profile.codex.flags=--remote-control --dangerously-bypass-approvals-and-sandbox'
 out=$(CLY_FLAGS='' run codex)
 hasnt 'empty override disables remote startup' 'ARG=remote-control' "$out"
 hasnt 'empty override disables bypass' 'ARG=--dangerously' "$out"
