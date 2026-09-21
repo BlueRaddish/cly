@@ -387,7 +387,7 @@ cly_kind_info() {  # KIND → the three above; 1 if cly has never heard of it
         codex)    kind_label='Codex';       kind_bypass=--dangerously-bypass-approvals-and-sandbox; kind_resume=resume ;;
         gemini)   kind_label='Gemini CLI';  kind_bypass=--yolo; kind_resume=--resume ;;
         muse)     kind_label='Muse Code';   kind_bypass=--yolo; kind_resume=resume ;;
-        kimi)     kind_label='Kimi Code';   kind_bypass=--yolo; kind_resume=--session ;;
+        kimi)     kind_label='Kimi Code';   kind_bypass=--auto; kind_resume=--session ;;
         qwen)     kind_label='Qwen Code';   kind_bypass=--yolo; kind_resume=--resume ;;
         opencode) kind_label='OpenCode';    kind_bypass=--auto; kind_resume=--session ;;
         *) return 1 ;;
@@ -415,19 +415,19 @@ cly_catalog_info() {  # NAME → the six above; 1 if not in the catalog
         codex)    cat_label='Codex'; cat_bin=codex; cat_flags=$CLY_CODEX_FLAGS
                   cat_install='npm install -g @openai/codex'
                   cat_login='codex login' ;;
-        gemini)   cat_label='Gemini CLI'; cat_bin=gemini
+        gemini)   cat_label='Gemini CLI'; cat_bin=gemini; cat_flags=--yolo
                   cat_install='npm install -g @google/gemini-cli'
                   cat_login='gemini, then pick "Login with Google"' ;;
         muse)     cat_label='Muse Code'; cat_bin=muse; cat_flags=--yolo
                   cat_install='https://dev.meta.ai/docs/muse-code (macOS, Linux, Windows)'
                   cat_login='muse login' ;;
-        kimi)     cat_label='Kimi Code'; cat_bin=kimi
+        kimi)     cat_label='Kimi Code'; cat_bin=kimi; cat_flags=--auto
                   cat_install='npm install -g @moonshot-ai/kimi-code'
                   cat_login='kimi, then /login' ;;
-        qwen)     cat_label='Qwen Code'; cat_bin=qwen
+        qwen)     cat_label='Qwen Code'; cat_bin=qwen; cat_flags=--yolo
                   cat_install='npm install -g @qwen-code/qwen-code'
                   cat_login='qwen, then /auth (a key or a coding plan)' ;;
-        opencode) cat_label='OpenCode'; cat_bin=opencode
+        opencode) cat_label='OpenCode'; cat_bin=opencode; cat_flags=--auto
                   cat_install='npm install -g opencode-ai'
                   cat_login='opencode auth login' ;;
         # No terminal agent of its own signs you in with a DeepSeek account.
@@ -435,14 +435,14 @@ cly_catalog_info() {  # NAME → the six above; 1 if not in the catalog
         # against one of Ollama's hosted models; everything after the -- is
         # Claude Code's, which is where -x and --resume land.
         deepseek) cat_label='DeepSeek'; cat_bin=ollama; cat_kind=claude
-                  cat_flags='launch claude --model deepseek-v4-pro --'
+                  cat_flags='launch claude --model deepseek-v4-pro -- --dangerously-skip-permissions'
                   cat_install='ollama, from https://ollama.com/download'
                   cat_login='ollama signin' ;;
-        # Meta hosts no Llama API any more and no agent signs in with Meta, so
-        # Llama runs on this machine: pull the weights once, then the same
+        # This entry runs Llama locally; Muse Code has its own entry above.
+        # Pull the weights once, then use the same
         # Claude-Code-through-Ollama route as above.
         meta)     cat_label='Llama'; cat_bin=ollama; cat_kind=claude
-                  cat_flags='launch claude --model llama3.1 --'
+                  cat_flags='launch claude --model llama3.1 -- --dangerously-skip-permissions'
                   cat_install='ollama, from https://ollama.com/download, then: ollama pull llama3.1'
                   cat_login='none — the model runs here' ;;
         *) return 1 ;;
@@ -1157,7 +1157,7 @@ cly_setup_profile() {  # NAME [WHY]
 
     echo "  Which flags should $name be given on every launch?"
     echo "  Enter flags, 'none' for no flags, or press Enter to keep the default."
-    echo "  (Claude/Codex defaults enable remote control and skip permission prompts.)"
+    echo "  (Catalog defaults skip prompts; Claude/Codex also enable remote control.)"
     printf '  [%s] > ' "${dflags:-none}"
     IFS= read -r reply || { cly_no_answer; return 2; }
     flags=${reply:-$dflags}
@@ -1250,7 +1250,7 @@ cly_resolve() {  # NAME
 # Everything a launch and a resume have in common: the environment, then exec.
 # FLAGS is deliberately unquoted where it is used: it is a list of arguments.
 cly_exec() {  # BIN FLAGS ENV ARG...
-    local bin=$1 flags=$2 env=$3 kv k v n flag remote=0
+    local bin=$1 flags=$2 env=$3 kv k v n flag remote=0 kimi_auto=0
     local -a launch_flags=()
     shift 3
     # shellcheck disable=SC2086
@@ -1270,9 +1270,19 @@ cly_exec() {  # BIN FLAGS ENV ARG...
         esac
         export "$k=$v"
     done
+    # Kimi's Never Ask mode replaces its older, mutually exclusive YOLO mode.
+    # -x must also work on profiles saved before that change.
+    if [ "$res_kind" = kimi ]; then
+        for flag in $flags "$@"; do
+            [ "$flag" != --auto ] || kimi_auto=1
+        done
+    fi
     # Codex remote control is a daemon command, not a TUI flag. Only interpret
     # the marker in standing flags; arguments after the profile stay untouched.
     for flag in $flags; do
+        if [ "$kimi_auto" = 1 ]; then
+            case $flag in --yolo|-y|--yes|--auto-approve) continue ;; esac
+        fi
         if [ "$res_kind" = codex ] && [ "$flag" = --remote-control ]; then
             remote=1
         else

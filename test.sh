@@ -584,7 +584,7 @@ out=$(run .)
 hasnt 'without -x the flag is not there' 'dangerously' "$out"
 
 for k in claude:--dangerously-skip-permissions codex:--dangerously-bypass-approvals-and-sandbox \
-         gemini:--yolo muse:--yolo kimi:--yolo qwen:--yolo opencode:--auto; do
+         gemini:--yolo muse:--yolo kimi:--auto qwen:--yolo opencode:--auto; do
     write_config 'default=k' "profile.k.bin=$stub" "profile.k.kind=${k%%:*}"
     out=$(run -x .)
     has  "-x on kind ${k%%:*} adds ${k#*:}" "ARG=${k#*:}" "$out"
@@ -747,7 +747,7 @@ out=$(ask '/deepseek
 
 ')
 has  'the route offers ollama' '[ollama] >' "$out"
-has  'and its launch words' '[launch claude --model deepseek-v4-pro --] >' "$out"
+has  'and its launch words' '[launch claude --model deepseek-v4-pro -- --dangerously-skip-permissions] >' "$out"
 has  'and launches through them' 'ARG=launch' "$out"
 has  'and records the kind' 'profile.deepseek.kind=claude' "$(config)"
 out=$(run -x deepseek)
@@ -999,6 +999,32 @@ has 'Muse init saves bypass default' 'profile.muse.flags=--yolo' "$(config)"
 out=$(run -x muse resume test-session)
 eq 'Muse bypass is not duplicated' 1 "$(printf '%s\n' "$out" | grep -c '^ARG=--yolo$')"
 has 'Muse native resume passes through' $'ARG=resume\nARG=test-session' "$out"
+
+# Defaults are written by init, but explicit existing flags remain authoritative.
+for spec in gemini:--yolo kimi:--auto qwen:--yolo opencode:--auto; do
+    tool=${spec%%:*}; flag=${spec#*:}
+    cp "$stub" "$work/bin/$tool"
+    reset_config
+    out=$(ask $'\n\n' init "$tool")
+    has "$tool saves current bypass default" "profile.$tool.flags=$flag" "$(config)"
+    out=$(run -x "$tool")
+    eq "$tool does not duplicate bypass" 1 "$(printf '%s\n' "$out" | grep -c "^ARG=$flag$")"
+    write_config "profile.$tool.bin=$tool" "profile.$tool.flags="
+    out=$(ask $'\n\n' init "$tool")
+    has "$tool preserves explicit empty flags" "profile.$tool.flags=" "$(config)"
+    out=$(run "$tool")
+    hasnt "$tool empty flags launch without bypass" "ARG=$flag" "$out"
+done
+write_config 'profile.kimi.bin=kimi' 'profile.kimi.flags=--yolo'
+out=$(run -x kimi)
+has 'Kimi -x upgrades old YOLO profile to Never Ask' 'ARG=--auto' "$out"
+hasnt 'Kimi does not receive conflicting YOLO mode' 'ARG=--yolo' "$out"
+out=$(run kimi)
+has 'Kimi old mode remains unchanged without -x' 'ARG=--yolo' "$out"
+reset_config
+cp "$stub" "$work/bin/ollama"
+out=$(ask $'\n\n\n' init meta)
+has 'Llama default bypass follows Ollama separator' 'profile.meta.flags=launch claude --model llama3.1 -- --dangerously-skip-permissions' "$(config)"
 
 # --- remote-control adapter ---------------------------------------------------
 

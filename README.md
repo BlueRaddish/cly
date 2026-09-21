@@ -3,7 +3,7 @@
 One command in front of every coding agent on the machine. A bare `cly` offers a menu of agents; `cly --resume` lists the sessions of all of them, newest first, and reopens the one you pick where it was born; `-x` adds the agent's own skip-the-prompts flag. A **profile** pins an executable, standing flags and a launch directory under a name, so `cly claude` starts [Claude Code](https://claude.ai/code) where its memories live whatever directory you are standing in.
 
 ```console
-$ cly                # a menu: claude, codex, gemini, kimi, qwen, opencode, deepseek, meta
+$ cly                # a menu: claude, codex, gemini, muse, kimi, qwen, opencode, deepseek, meta
 $ cly .              # the default profile — Claude Code, in ~/claude
 $ cly -x codex       # codex, right here, with its approval prompts off
 $ cly -r             # every agent's sessions on one screen; Enter resumes the one in hand
@@ -59,7 +59,7 @@ Move with the arrows and press Enter, or `x` to launch with the agent's prompts 
 $ cly init claude
   Which flags should claude be given on every launch?
   Enter flags, 'none' for no flags, or press Enter to keep the default.
-  (Claude/Codex defaults enable remote control and skip permission prompts.)
+  (Catalog defaults skip prompts; Claude/Codex also enable remote control.)
   [--remote-control --dangerously-skip-permissions] >
 
   Claude Code keeps a separate memory store for every directory it is
@@ -150,7 +150,7 @@ The transcripts themselves are never read — opening one costs a disk access ea
 | `claude` | `--dangerously-skip-permissions` | `claude`, then `/login` |
 | `codex` | `--dangerously-bypass-approvals-and-sandbox` | `codex login` |
 | `gemini` | `--yolo` | `gemini`, then pick "Login with Google" |
-| `kimi` | `--yolo` | `kimi`, then `/login` |
+| `kimi` | `--auto` (Never Ask) | `kimi`, then `/login` |
 | `qwen` | `--yolo` | `qwen`, then `/auth` (a key or a coding plan) |
 | `opencode` | `--auto` | `opencode auth login` |
 
@@ -162,7 +162,7 @@ A profile's kind is its executable's name, so `profile.codex.bin=codex` needs no
 
 ```
 profile.deepseek.bin=ollama
-profile.deepseek.flags=launch claude --model deepseek-v4-pro --
+profile.deepseek.flags=launch claude --model deepseek-v4-pro -- --dangerously-skip-permissions
 profile.deepseek.dir=none
 profile.deepseek.kind=claude
 ```
@@ -256,11 +256,28 @@ No agent is launched — `CLY_BIN` points at a stub that prints its working dire
 
 ## Remote control and permission defaults
 
-New Claude and Codex profiles default to remote control and permission bypass. `cly init` displays these flags before saving; enter `none` to disable both, or supply your own flags. Existing profiles keep their explicit flags. `-x` remains available for other profiles and does not duplicate an existing bypass flag.
+New catalog profiles default to their supported permission-bypass or auto-approval mode. Claude and Codex also default to remote control. `cly init` displays these flags before saving; enter `none` to disable both, or supply your own flags. Existing profiles keep their explicit flags. `-x` remains available for other profiles and does not duplicate an existing bypass flag.
 
 Claude receives `--remote-control --dangerously-skip-permissions`. For Codex, the standing `--remote-control` marker tells cly to run `codex remote-control start`, then connect the terminal using `--remote unix://` with `--dangerously-bypass-approvals-and-sandbox`. Startup failure stops the launch. This also applies when resuming through a configured Codex profile, and requires a Codex version supporting these commands. Arguments after the profile name remain native agent arguments; put the Codex marker in `profile.NAME.flags`, not after the profile name.
 
-These defaults allow commands and writes without permission prompts (and disable Codex's sandbox). Use explicit profile flags or `CLY_FLAGS=''` for launches that should retain permission checks. See the [Codex command reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli#codex-remote-control) for remote-control setup.
+Defaults checked on 2026-09-21:
+
+| Entry | Standing defaults | Remote access |
+|---|---|---|
+| Claude | `--remote-control --dangerously-skip-permissions` | Same terminal session |
+| Codex | `--remote-control --dangerously-bypass-approvals-and-sandbox` | Daemon + connected terminal, as above |
+| Gemini | `--yolo` | No verified remote-control startup flag |
+| Muse | `--yolo` | No remote-control flag in installed CLI help |
+| Kimi | `--auto` | Use `/remote-control` within the session; `kimi rc` is a separate foreground mode |
+| Qwen | `--yolo` | No verified remote-control startup flag |
+| OpenCode | `--auto` | Native server/attach workflow; no cloud relay enabled by cly |
+| DeepSeek / Llama | Ollama launch prefix, then `--dangerously-skip-permissions` | Claude remote control does not support custom API endpoints |
+
+[Kimi’s current CLI reference](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-command) distinguishes `--auto` (Never Ask) from `--yolo` (Ask When Needed). `cly -x kimi` replaces a saved YOLO flag for that launch; the config is preserved. [Kimi remote control](https://www.kimi.com/code/docs/en/kimi-code-cli/guides/remote-control.html) is a separate foreground mode or an in-session command, so cly does not silently replace the terminal with a web server.
+
+[OpenCode’s `--auto`](https://opencode.ai/docs/cli) still respects explicit deny rules. [Gemini’s YOLO mode](https://geminicli.com/docs/reference/configuration/) auto-approves tool calls but can retain sandbox/policy restrictions. These native flags do not override administrator policies. [Claude remote-control requirements](https://code.claude.com/docs/en/remote-control#requirements) exclude the custom endpoints used by Ollama, so those routes receive only the bypass flag.
+
+These defaults skip ordinary approval prompts; Codex and Muse also disable their sandboxes. Use explicit profile flags or `CLY_FLAGS=''` for launches that should retain permission checks. See the [Codex command reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli#codex-remote-control) for remote-control setup.
 
 ## License
 
