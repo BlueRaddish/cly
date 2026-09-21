@@ -584,7 +584,7 @@ out=$(run .)
 hasnt 'without -x the flag is not there' 'dangerously' "$out"
 
 for k in claude:--dangerously-skip-permissions codex:--dangerously-bypass-approvals-and-sandbox \
-         gemini:--yolo kimi:--yolo qwen:--yolo opencode:--auto; do
+         gemini:--yolo muse:--yolo kimi:--yolo qwen:--yolo opencode:--auto; do
     write_config 'default=k' "profile.k.bin=$stub" "profile.k.kind=${k%%:*}"
     out=$(run -x .)
     has  "-x on kind ${k%%:*} adds ${k#*:}" "ARG=${k#*:}" "$out"
@@ -986,6 +986,19 @@ for tool in cat sed awk grep tr cut basename dirname; do
         ok
     fi
 done
+
+# Muse is fourth in the catalog and launches with its native bypass flag.
+reset_config
+out=$(ask $'\e')
+has 'Muse appears fourth in the default menu' '4  muse' "$out"
+has 'Muse has its own label' 'Muse Code' "$out"
+# Own the executable discovery, regardless of whether Muse is installed here.
+cp "$stub" "$work/bin/muse"
+out=$(ask $'\n\n' init muse)
+has 'Muse init saves bypass default' 'profile.muse.flags=--yolo' "$(config)"
+out=$(run -x muse resume test-session)
+eq 'Muse bypass is not duplicated' 1 "$(printf '%s\n' "$out" | grep -c '^ARG=--yolo$')"
+has 'Muse native resume passes through' $'ARG=resume\nARG=test-session' "$out"
 
 # --- remote-control adapter ---------------------------------------------------
 

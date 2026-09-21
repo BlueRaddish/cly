@@ -45,11 +45,12 @@ cly 4.1.0 — which agent?
     1  claude    Claude Code  installed, no profile yet
     2  codex     Codex        installed, no profile yet
     3  gemini    Gemini CLI   not installed: npm install -g @google/gemini-cli
-    4  kimi      Kimi Code    not installed: npm install -g @moonshot-ai/kimi-code
-    5  qwen      Qwen Code    not installed: npm install -g @qwen-code/qwen-code
-    6  opencode  OpenCode     not installed: npm install -g opencode-ai
-    7  deepseek  DeepSeek     not installed: ollama, from https://ollama.com/download
-    8  meta      Llama        not installed: ollama, from https://ollama.com/download, then: ollama pull llama3.1
+    4  muse      Muse Code    installed, no profile yet
+    5  kimi      Kimi Code    not installed: npm install -g @moonshot-ai/kimi-code
+    6  qwen      Qwen Code    not installed: npm install -g @qwen-code/qwen-code
+    7  opencode  OpenCode     not installed: npm install -g opencode-ai
+    8  deepseek  DeepSeek     not installed: ollama, from https://ollama.com/download
+    9  meta      Llama        not installed: ollama, from https://ollama.com/download, then: ollama pull llama3.1
 ```
 
 Move with the arrows and press Enter, or `x` to launch with the agent's prompts skipped; `/` searches the list. Picking a tool that is installed but has no profile asks the setup questions and then launches it; picking one that is not installed prints how to get it and how to sign in. `cly init NAME` asks the same questions on their own:
@@ -134,6 +135,7 @@ Each kind's store, and what cly reads from it:
 | `claude` | `~/.claude/history.jsonl` — every typed prompt with its session id, directory and time; the name from `/rename` (`custom-title.json` beside the transcript) is the title; a session whose transcript has been cleaned up is not offered | `--resume ID` |
 | `codex` | `~/.codex/history.jsonl` and `session_index.jsonl`; the directory comes from the session's rollout file, and a session without one is not offered | `resume ID` |
 | `gemini` | `~/.gemini/tmp/*/chats/session-*.json*`, newest first by name; the directory from the project's `.project_root` or `~/.gemini/projects.json` | `--resume ID` |
+| `muse` | `--yolo` (approvals and sandbox) | `muse login` |
 | `kimi` | `~/.kimi-code/session_index.jsonl`, then each session's `state.json` for title, directory and time | `--session ID` |
 | `qwen`, `opencode` | not listed: a per-directory tree that cannot be mapped back to a directory, and a database. `-x` still knows their flags | — |
 
@@ -141,7 +143,7 @@ The transcripts themselves are never read — opening one costs a disk access ea
 
 ## Agents
 
-`-x` knows the skip-the-prompts flag of six kinds, `-r` the session store of four:
+`-x` knows the skip-the-prompts flag of seven kinds, `-r` the session store of four:
 
 | Kind | Skip prompts | Sign in |
 |---|---|---|
@@ -152,9 +154,11 @@ The transcripts themselves are never read — opening one costs a disk access ea
 | `qwen` | `--yolo` | `qwen`, then `/auth` (a key or a coding plan) |
 | `opencode` | `--auto` | `opencode auth login` |
 
+[Muse Code](https://dev.meta.ai/docs/muse-code) is fourth in the catalog (configured profiles appear first). It supports normal launch and `-x`; use `cly muse resume` for its native session picker. Muse sessions are not yet included in `cly -r`.
+
 A profile's kind is its executable's name, so `profile.codex.bin=codex` needs nothing more; `profile.NAME.kind=KIND` says otherwise when the executable is not the agent.
 
-**DeepSeek and Llama are routes, not kinds.** No terminal agent signs you in with a DeepSeek account, and Meta hosts no Llama API any more. The menu's `deepseek` and `meta` entries set up Claude Code through [Ollama](https://ollama.com) — `ollama signin` for DeepSeek's hosted models, `ollama pull llama3.1` for Llama on your own machine — as a profile of kind `claude`:
+**DeepSeek and Llama are routes, not kinds.** No terminal agent signs you in with a DeepSeek account, and the Llama entry runs through Ollama. Meta’s Muse Code is a separate native agent. The menu's `deepseek` and `meta` entries set up Claude Code through [Ollama](https://ollama.com) — `ollama signin` for DeepSeek's hosted models, `ollama pull llama3.1` for Llama on your own machine — as a profile of kind `claude`:
 
 ```
 profile.deepseek.bin=ollama

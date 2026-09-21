@@ -370,7 +370,7 @@ cly_is_reserved() {  # NAME
 # prompts, and the words that reopen one of its sessions by id. A profile's
 # kind is its executable's name unless profile.NAME.kind says otherwise, which
 # is how `ollama launch claude` counts as Claude Code.
-CLY_KINDS='claude codex gemini kimi qwen opencode'
+CLY_KINDS='claude codex gemini muse kimi qwen opencode'
 
 # The kinds whose sessions -r can list. Qwen Code and OpenCode keep theirs in
 # shapes this script cannot read (a per-directory tree it cannot map back to
@@ -386,6 +386,7 @@ cly_kind_info() {  # KIND → the three above; 1 if cly has never heard of it
         claude)   kind_label='Claude Code'; kind_bypass=--dangerously-skip-permissions; kind_resume=--resume ;;
         codex)    kind_label='Codex';       kind_bypass=--dangerously-bypass-approvals-and-sandbox; kind_resume=resume ;;
         gemini)   kind_label='Gemini CLI';  kind_bypass=--yolo; kind_resume=--resume ;;
+        muse)     kind_label='Muse Code';   kind_bypass=--yolo; kind_resume=resume ;;
         kimi)     kind_label='Kimi Code';   kind_bypass=--yolo; kind_resume=--session ;;
         qwen)     kind_label='Qwen Code';   kind_bypass=--yolo; kind_resume=--resume ;;
         opencode) kind_label='OpenCode';    kind_bypass=--auto; kind_resume=--session ;;
@@ -397,7 +398,7 @@ cly_kind_info() {  # KIND → the three above; 1 if cly has never heard of it
 # terminal agent of their own and reach one through Ollama instead. Each entry
 # knows how to get itself and how to sign in, so picking one that is not here
 # yet prints the two lines that would make it so.
-CLY_CATALOG='claude codex gemini kimi qwen opencode deepseek meta'
+CLY_CATALOG='claude codex gemini muse kimi qwen opencode deepseek meta'
 
 cat_label=''
 cat_bin=''
@@ -417,6 +418,9 @@ cly_catalog_info() {  # NAME → the six above; 1 if not in the catalog
         gemini)   cat_label='Gemini CLI'; cat_bin=gemini
                   cat_install='npm install -g @google/gemini-cli'
                   cat_login='gemini, then pick "Login with Google"' ;;
+        muse)     cat_label='Muse Code'; cat_bin=muse; cat_flags=--yolo
+                  cat_install='https://dev.meta.ai/docs/muse-code (macOS, Linux, Windows)'
+                  cat_login='muse login' ;;
         kimi)     cat_label='Kimi Code'; cat_bin=kimi
                   cat_install='npm install -g @moonshot-ai/kimi-code'
                   cat_login='kimi, then /login' ;;
@@ -1023,7 +1027,7 @@ ARGUMENTS
 AGENTS
   claude codex gemini kimi  kinds -x knows the flag of and -r reads the
                             sessions of
-  qwen opencode             kinds -x knows the flag of; their sessions are
+  muse qwen opencode        kinds -x knows the flag of; their sessions are
                             in shapes cly cannot read, so -r skips them
   deepseek meta             routes: Claude Code through Ollama, set up from
                             the menu or by `cly init NAME`
@@ -1588,6 +1592,7 @@ cly_tint() {  # KIND-OR-NAME → tint
         claude)   tint=33 ;;   # yellow
         codex)    tint=32 ;;   # green
         gemini)   tint=36 ;;   # cyan
+        muse)     tint=34 ;;   # blue
         kimi)     tint=35 ;;   # magenta
         qwen)     tint=34 ;;   # blue
         opencode) tint=37 ;;   # white
