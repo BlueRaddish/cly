@@ -282,17 +282,17 @@ none
 ' init codex)
 has  'a second profile beside v2 lines pins the v2 default' 'default=claude' "$(config)"
 
-# The claude profile is offered Claude Code's flags; nothing else is.
+# Each built-in profile is offered its own remote-control and bypass defaults.
 reset_config
 out=$(ask '
 none
 ' init claude)
-has  'claude is offered the standing flags' '[--remote-control] >' "$out"
-hasnt 'but not the bypass, which is -x now' 'dangerously' "$out"
+has  'claude is offered the standing flags' '[--remote-control --dangerously-skip-permissions] >' "$out"
+has 'claude offers permission bypass' '--dangerously-skip-permissions' "$out"
 out=$(ask '
 none
 ' init codex)
-hasnt 'codex is not' '--remote-control' "$out"
+has 'codex offers remote and bypass defaults' '[--remote-control --dangerously-bypass-approvals-and-sandbox] >' "$out"
 
 out=$(run init config); rc=$?
 eq   'a reserved name exits 2' 2 "$rc"
@@ -986,6 +986,35 @@ for tool in cat sed awk grep tr cut basename dirname; do
         ok
     fi
 done
+
+# --- remote-control adapter ---------------------------------------------------
+
+write_config 'profile.codex.bin=codex' \
+    'profile.codex.flags=--remote-control --dangerously-bypass-approvals-and-sandbox'
+out=$(run codex 'a prompt with spaces'); rc=$?
+eq 'remote codex launches successfully' 0 "$rc"
+has 'codex starts remote daemon first' $'ARG=remote-control\nARG=start\nPWD=' "$out"
+has 'codex connects to daemon' $'ARG=--remote\nARG=unix://' "$out"
+has 'codex uses full bypass flag' 'ARG=--dangerously-bypass-approvals-and-sandbox' "$out"
+hasnt 'codex never receives unsupported remote flag' 'ARG=--remote-control' "$out"
+has 'prompt stays one argument' 'ARG=a prompt with spaces' "$out"
+out=$(run -x codex)
+count=$(printf '%s\n' "$out" | grep -c '^ARG=--dangerously-bypass-approvals-and-sandbox$')
+eq 'explicit bypass is not duplicated' 1 "$count"
+out=$(run codex resume test-session)
+has 'native resume reaches connected terminal' $'ARG=resume\nARG=test-session' "$out"
+out=$(CLY_FLAGS='' run codex)
+hasnt 'empty override disables remote startup' 'ARG=remote-control' "$out"
+hasnt 'empty override disables bypass' 'ARG=--dangerously' "$out"
+failure_stub="$work/failing-remote"
+printf '%s\n' '#!/usr/bin/env bash' \
+    'if [ "$1" = remote-control ]; then exit 7; fi' \
+    'echo UNEXPECTED-LAUNCH' > "$failure_stub"
+chmod +x "$failure_stub"
+out=$(CLY_BIN="$failure_stub" run codex); rc=$?
+eq 'failed daemon startup fails launch' 1 "$rc"
+hasnt 'failed daemon never launches terminal' 'UNEXPECTED-LAUNCH' "$out"
+has 'failed daemon has actionable error' 'remote control could not start' "$(err)"
 
 # --- report -------------------------------------------------------------------
 

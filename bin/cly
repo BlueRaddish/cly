@@ -42,7 +42,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] || { [ "${BASH_VERSINFO[0]}" = 4 ] && [ "${BA
     exit 2
 fi
 
-CLY_VERSION=4.0.0
+CLY_VERSION=4.1.0
 
 # Print a here-doc without cat, which is not a builtin: the .cmd door may hand
 # this script a bash whose PATH carries no coreutils at all, and one of these
@@ -52,9 +52,9 @@ cly_emit() {
     while IFS= read -r line || [ -n "$line" ]; do printf '%s\n' "$line"; done
 }
 
-# Offered as the default answer when the profile being set up runs Claude Code.
-# Skipping permissions is no longer part of it: that is what -x is for.
-CLY_CLAUDE_FLAGS='--remote-control'
+# Offered by init; existing profiles and explicit empty flags stay unchanged.
+CLY_CLAUDE_FLAGS='--remote-control --dangerously-skip-permissions'
+CLY_CODEX_FLAGS='--remote-control --dangerously-bypass-approvals-and-sandbox'
 
 # What a v2 config with no flags= line meant, and still means: v2 had no -x,
 # so taking the bypass out of it would change a launch nobody edited. -x sees
@@ -411,7 +411,7 @@ cly_catalog_info() {  # NAME → the six above; 1 if not in the catalog
         claude)   cat_label='Claude Code'; cat_bin=claude; cat_flags=$CLY_CLAUDE_FLAGS
                   cat_install='npm install -g @anthropic-ai/claude-code'
                   cat_login='claude, then /login' ;;
-        codex)    cat_label='Codex'; cat_bin=codex
+        codex)    cat_label='Codex'; cat_bin=codex; cat_flags=$CLY_CODEX_FLAGS
                   cat_install='npm install -g @openai/codex'
                   cat_login='codex login' ;;
         gemini)   cat_label='Gemini CLI'; cat_bin=gemini
@@ -1153,7 +1153,7 @@ cly_setup_profile() {  # NAME [WHY]
 
     echo "  Which flags should $name be given on every launch?"
     echo "  Enter flags, 'none' for no flags, or press Enter to keep the default."
-    echo "  (Skipping permission prompts is not a flag to put here: that is 'cly -x'.)"
+    echo "  (Claude/Codex defaults enable remote control and skip permission prompts.)"
     printf '  [%s] > ' "${dflags:-none}"
     IFS= read -r reply || { cly_no_answer; return 2; }
     flags=${reply:-$dflags}
@@ -1246,7 +1246,8 @@ cly_resolve() {  # NAME
 # Everything a launch and a resume have in common: the environment, then exec.
 # FLAGS is deliberately unquoted where it is used: it is a list of arguments.
 cly_exec() {  # BIN FLAGS ENV ARG...
-    local bin=$1 flags=$2 env=$3 kv k v n
+    local bin=$1 flags=$2 env=$3 kv k v n flag remote=0
+    local -a launch_flags=()
     shift 3
     # shellcheck disable=SC2086
     for kv in $env; do
@@ -1265,8 +1266,23 @@ cly_exec() {  # BIN FLAGS ENV ARG...
         esac
         export "$k=$v"
     done
-    # shellcheck disable=SC2086
-    exec "$bin" $flags "$@"
+    # Codex remote control is a daemon command, not a TUI flag. Only interpret
+    # the marker in standing flags; arguments after the profile stay untouched.
+    for flag in $flags; do
+        if [ "$res_kind" = codex ] && [ "$flag" = --remote-control ]; then
+            remote=1
+        else
+            launch_flags+=("$flag")
+        fi
+    done
+    if [ "$remote" = 1 ]; then
+        "$bin" remote-control start || {
+            echo "cly: Codex remote control could not start; session not launched" >&2
+            return 1
+        }
+        launch_flags+=(--remote unix://)
+    fi
+    exec "$bin" "${launch_flags[@]}" "$@"
 }
 
 # The one flag -x adds — nothing, when the profile's standing flags already

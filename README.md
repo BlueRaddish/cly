@@ -40,7 +40,7 @@ Nothing is configured by the install. The first `cly`, `cly init`, or `cly .` as
 
 ```console
 $ cly
-cly 4.0.0 — which agent?
+cly 4.1.0 — which agent?
 
     1  claude    Claude Code  installed, no profile yet
     2  codex     Codex        installed, no profile yet
@@ -58,8 +58,8 @@ Move with the arrows and press Enter, or `x` to launch with the agent's prompts 
 $ cly init claude
   Which flags should claude be given on every launch?
   Enter flags, 'none' for no flags, or press Enter to keep the default.
-  (Skipping permission prompts is not a flag to put here: that is 'cly -x'.)
-  [--remote-control] >
+  (Claude/Codex defaults enable remote control and skip permission prompts.)
+  [--remote-control --dangerously-skip-permissions] >
 
   Claude Code keeps a separate memory store for every directory it is
   launched from, so pinning one means the same memories load each time.
@@ -79,9 +79,9 @@ cly [OPTION...] [PROFILE|.] [AGENT-ARG...]
 **The first word is always cly's. Everything after the profile name is always the agent's.** Neither can claim the other's flags, which is why nothing here needs a `--cly-` prefix. With no profile named at all, cly offers the menu.
 
 ```console
-$ cly claude --model opus   # claude --remote-control --model opus
+$ cly claude --model opus   # claude --remote-control --dangerously-skip-permissions --model opus
 $ cly -x claude             # claude --remote-control --dangerously-skip-permissions
-$ cly -x codex --search     # codex --dangerously-bypass-approvals-and-sandbox --search
+$ cly -x codex --search     # starts remote control, then codex --remote unix:// --dangerously-bypass-approvals-and-sandbox --search
 $ cly --dir ~/work codex    # cly takes --dir; codex gets nothing extra
 $ cly one --help            # the agent's help, because it is after the name
 $ cly --help                # cly's help, because it is before one
@@ -113,7 +113,7 @@ Options go **before** the profile name. Exit status is `0` when the agent was la
 
 ```console
 $ cly -r
-cly 4.0.0 — which session?                                                      1/30
+cly 4.1.0 — which session?                                                      1/30
 up/down move · type to filter · Enter resume · Esc quit · 30 of 76 · CLY_ROWS=60 shows more
     #  agent     last      where                       title
     1  claude    2m ago    ~/claude                    Upgrade cly into a funnel for multiple agents
@@ -180,11 +180,11 @@ A profile is a name with an executable, flags and a launch directory of its own,
 default=claude
 
 profile.claude.bin=claude
-profile.claude.flags=--remote-control
+profile.claude.flags=--remote-control --dangerously-skip-permissions
 profile.claude.dir=/c/Users/me/claude
 
 profile.codex.bin=codex
-profile.codex.flags=--search
+profile.codex.flags=--remote-control --dangerously-bypass-approvals-and-sandbox
 profile.codex.dir=none
 ```
 
@@ -250,9 +250,13 @@ Your shell's own working directory is untouched: `cly` is a script, so the `cd` 
 
 No agent is launched — `CLY_BIN` points at a stub that prints its working directory, its arguments and the environment it was given, which is the whole of what `cly` decides — and `CLY_CONFIG` and the four store variables point into a scratch directory, so the real config and the real session stores are unreachable from the suite. The stores it builds are shaped as the agents write theirs. A dropping check count means a check stopped running, not that it started passing.
 
-## A warning about -x
+## Remote control and permission defaults
 
-`cly -x` turns off the agent's permission prompts entirely — every file write, every shell command, no confirmation. That is a reasonable choice on a trusted personal machine and a bad one anywhere else. It is a flag you type each time, never a standing default: setting up a Claude Code profile offers `--remote-control` and nothing more, and the flags question says so.
+New Claude and Codex profiles default to remote control and permission bypass. `cly init` displays these flags before saving; enter `none` to disable both, or supply your own flags. Existing profiles keep their explicit flags. `-x` remains available for other profiles and does not duplicate an existing bypass flag.
+
+Claude receives `--remote-control --dangerously-skip-permissions`. For Codex, the standing `--remote-control` marker tells cly to run `codex remote-control start`, then connect the terminal using `--remote unix://` with `--dangerously-bypass-approvals-and-sandbox`. Startup failure stops the launch. This also applies when resuming through a configured Codex profile, and requires a Codex version supporting these commands. Arguments after the profile name remain native agent arguments; put the Codex marker in `profile.NAME.flags`, not after the profile name.
+
+These defaults allow commands and writes without permission prompts (and disable Codex's sandbox). Use explicit profile flags or `CLY_FLAGS=''` for launches that should retain permission checks. See the [Codex command reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli#codex-remote-control) for remote-control setup.
 
 ## License
 
