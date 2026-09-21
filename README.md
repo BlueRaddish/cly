@@ -279,6 +279,10 @@ Defaults checked on 2026-09-21:
 
 These defaults skip ordinary approval prompts; Codex and Muse also disable their sandboxes. Use explicit profile flags or `CLY_FLAGS=''` for launches that should retain permission checks. See the [Codex command reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli#codex-remote-control) for remote-control setup.
 
+## Portability follow-ups
+
+See the [cross-platform reliability review](docs/portability.md) for reproduced installation failures and prioritized macOS, Linux, and Windows improvements.
+
 ## License
 
 MIT
