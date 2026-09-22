@@ -986,6 +986,8 @@ write_config 'default=code' 'profile.code.bin=codex' \
              "profile.cloud.dir=$pinned" 'profile.cloud.env=CLY_T_A=cloud'
 out=$(ask '' -t); rc=$?
 eq   '-t launches without local sessions' 0 "$rc"
+has  'teleport identifies the provider and selected profile' 'Agent: Claude Code (claude) · Profile: cloud' "$(err)"
+has  'teleport labels the screen' 'cly — teleport' "$(err)"
 has  '-t uses the Claude profile even when another kind is default' 'ENV CLY_T_A=cloud' "$out"
 has  '-t stays in the caller repository instead of the pinned directory' "PWD=$here" "$out"
 args=$(printf '%s\n' "$out" | grep '^ARG=' | tr '\n' ' ')
@@ -1012,6 +1014,7 @@ hasnt 'CLY_FLAGS can clear standing teleport flags' 'ARG=--remote-control' "$out
 out=$(run -t); rc=$?
 eq   'teleport without a terminal exits 2' 2 "$rc"
 has  'teleport without a terminal explains why' 'needs a terminal' "$(err)"
+hasnt 'a rejected teleport does not announce a picker' 'Agent: Claude Code' "$(err)"
 hasnt 'teleport without a terminal never launches' 'PWD=' "$out"
 for mode in -r -c --resume --continue; do
     out=$(ask '' -t "$mode"); rc=$?
@@ -1024,6 +1027,8 @@ eq   'conflicting modes are rejected in either order' 2 "$rc"
 out=$(ask '' -t code); rc=$?
 eq   'teleport rejects a non-Claude profile' 2 "$rc"
 has  'unsupported teleport kind is explained' 'supports Claude Code only' "$(err)"
+has  'Codex teleport explains why Mac sessions are missing' 'Remote Control alone does not make them discoverable here' "$(err)"
+has  'Codex teleport points to the supported device connection' 'Connections > Control other devices' "$(err)"
 out=$(ask '' -t .); rc=$?
 eq   'teleport dot respects a non-Claude default rather than silently switching' 2 "$rc"
 out=$(ask '' -t missing); rc=$?
@@ -1037,6 +1042,7 @@ out=$(ask '' -t)
 has  'teleport prefers the default Claude profile' 'ENV CLY_T_A=second' "$out"
 out=$(ask '' -t first)
 has  'an explicit teleport profile wins over the default' 'ENV CLY_T_A=first' "$out"
+has  'the heading names the explicit profile' 'Agent: Claude Code (claude) · Profile: first' "$(err)"
 out=$(ask '' -t .)
 has  'teleport dot resolves the default Claude profile' 'ENV CLY_T_A=second' "$out"
 write_config 'profile.wrapped.bin=wrapper' 'profile.wrapped.kind=claude' \
@@ -1048,6 +1054,7 @@ eq   'teleport honours kind overrides without duplicating bypass' \
 reset_config
 out=$(ask '' -t)
 has  'teleport works with bare Claude and no config' 'ARG=--teleport' "$out"
+has  'bare teleport identifies Claude without configured profiles' 'Agent: Claude Code (claude) · Profile: claude' "$(err)"
 [ ! -e "$CLY_CONFIG" ] && ok || bad 'teleport does not create a profile'
 out=$(ask '' -t claude)
 has  'explicit bare claude also teleports' 'ARG=--teleport' "$out"

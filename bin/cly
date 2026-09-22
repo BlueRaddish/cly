@@ -42,7 +42,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] || { [ "${BASH_VERSINFO[0]}" = 4 ] && [ "${BA
     exit 2
 fi
 
-CLY_VERSION=4.2.0
+CLY_VERSION=4.2.1
 
 # Print a here-doc without cat, which is not a builtin: the .cmd door may hand
 # this script a bash whose PATH carries no coreutils at all, and one of these
@@ -2001,6 +2001,10 @@ cly_teleport() {  # PROFILE DIR HERE BYPASS [AGENT-ARG...]
     cly_resolve "$name"
     if [ "$res_kind" != claude ]; then
         echo "cly: --teleport supports Claude Code only; $name is of kind '$res_kind'" >&2
+        if [ "$res_kind" = codex ]; then
+            echo "cly: Mac Codex sessions are not Claude cloud sessions; Remote Control alone does not make them discoverable here" >&2
+            echo "cly: use the desktop app's Connections > Control other devices; CLI access needs a configured SSH/app-server connection" >&2
+        fi
         return 2
     fi
     if ! cly_is_interactive; then
@@ -2023,6 +2027,7 @@ cly_teleport() {  # PROFILE DIR HERE BYPASS [AGENT-ARG...]
         bypass=$(cly_bypass_flag "$name" "$res_kind") || return $?
     else bypass=''
     fi
+    printf 'cly — teleport\n  Agent: Claude Code (claude) · Profile: %s\n\n' "$name" >&2
     cly_exec "$res_bin" "$res_flags" "$res_env" "$bypass" --teleport "$@"
 }
 

@@ -154,6 +154,8 @@ $ cly -t claude SESSION_ID        # teleport a known session directly
 ```
 
 `-t` / `--teleport` opens **Claude Code's own authenticated remote-session picker**.
+The heading identifies the agent (`Claude Code (claude)`) and selected profile;
+all sessions in this picker are from Claude Code, not Codex or another agent.
 Claude lists the available cloud sessions, handles selection, verifies the repository,
 fetches the selected branch and loads the conversation. Cly does not read credentials
 or maintain a separate remote-session cache. This is separate from `-r`, which lists
@@ -173,6 +175,14 @@ a Claude version supporting `--teleport`, and subscription login to the same acc
 are required. Claude reports login, network, repository and eligibility errors itself;
 cly preserves its exit status. Sessions that exist only in another machine's local
 history are not made teleportable by this feature.
+
+**Codex sessions on another computer:** enabling Codex Remote Control on a Mac does
+not add its sessions to this Claude picker. In the desktop app, use
+**Settings → Connections → Control other devices** to connect to the Mac. Codex's CLI
+can resume against an explicitly configured app-server endpoint (`codex --remote ADDR
+resume --all`); the installed CLI does not expose an account-wide picker of paired
+Remote Control hosts. Cly does not yet configure that host connection or move Codex
+sessions between machines. See [remote connections and chat handoff](https://learn.chatgpt.com/docs/remote-connections).
 
 See [Claude's teleport documentation](https://code.claude.com/docs/en/claude-code-on-the-web#from-cloud-to-terminal)
 for current requirements.
