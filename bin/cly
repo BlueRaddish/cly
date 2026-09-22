@@ -42,7 +42,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] || { [ "${BASH_VERSINFO[0]}" = 4 ] && [ "${BA
     exit 2
 fi
 
-CLY_VERSION=4.1.0
+CLY_VERSION=4.2.0
 
 # Print a here-doc without cat, which is not a builtin: the .cmd door may hand
 # this script a bash whose PATH carries no coreutils at all, and one of these
@@ -2023,7 +2023,7 @@ cly_teleport() {  # PROFILE DIR HERE BYPASS [AGENT-ARG...]
         bypass=$(cly_bypass_flag "$name" "$res_kind") || return $?
     else bypass=''
     fi
-    cly_exec "$res_bin" "$res_flags" "$res_env" ${bypass:+"$bypass"} --teleport "$@"
+    cly_exec "$res_bin" "$res_flags" "$res_env" "$bypass" --teleport "$@"
 }
 
 # --- main --------------------------------------------------------------------
