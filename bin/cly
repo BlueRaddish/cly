@@ -42,7 +42,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] || { [ "${BASH_VERSINFO[0]}" = 4 ] && [ "${BA
     exit 2
 fi
 
-CLY_VERSION=4.2.1
+CLY_VERSION=4.2.2
 
 # Print a here-doc without cat, which is not a builtin: the .cmd door may hand
 # this script a bash whose PATH carries no coreutils at all, and one of these
@@ -951,7 +951,6 @@ usage: cly [OPTION...] [PROFILE|.] [AGENT-ARG...]
   cly .            launch the default profile
   cly NAME         launch the profile called NAME
   cly -r           pick a session of any agent and resume it
-  cly -t           pick a Claude cloud session and teleport it here
   cly -x NAME      launch it with its permission prompts skipped
   cly init [NAME]  set up a profile
   cly config       show what is configured
@@ -985,7 +984,6 @@ EXAMPLES
   $ cly -x .                  the same, with its permission prompts skipped
   $ cly -r                    pick a session of any agent, resume it there
   $ cly -x -r codex           resume a codex session, prompts skipped
-  $ cly -t                    open Claude's cloud session picker here
   $ cly claude --model opus   launch claude; --model opus reaches the agent
   $ cly --dir ~/work codex    launch it somewhere else, this call only
   $ cly init deepseek         set that profile up, or change it
@@ -1001,7 +999,6 @@ OPTIONS
   -r, --resume    list every agent's sessions, newest first, and resume the
                   one picked; with a PROFILE, only that agent's
   -c, --continue  resume the newest session without asking
-  -t, --teleport  pick a Claude cloud session to continue locally
   -d, --dir DIR   launch from DIR, this call only
       --here      launch from the current directory, this call only
   -h, --help      show this help
@@ -1037,13 +1034,6 @@ AGENTS
 
   A session is resumed in the directory it was started in, by the profile of
   its kind, or by the bare agent when no profile has that kind.
-
-  Teleport uses Claude's own authenticated picker. Run it in the matching
-  repository, or use --dir DIR (CLY_DIR also applies; a profile's pinned
-  directory does not). With no PROFILE, use the first Claude profile,
-  preferring the default, or bare claude. Requires a terminal and Claude
-  subscription login. To pick by ID: cly -t claude SESSION_ID
-  -t cannot be combined with -r or -c; other agent kinds are unsupported.
 
 ENVIRONMENT
   CLY_DIR     launch directory, overriding the profile
@@ -1982,59 +1972,10 @@ cly_profile_of_kind() {  # KIND
     return 1
 }
 
-# Cloud discovery and authentication belong to Claude's supported picker.
-# There is no local session index for these sessions. Keep the caller's repo
-# instead of the profile's memory directory; Claude verifies it before fetching.
-cly_teleport() {  # PROFILE DIR HERE BYPASS [AGENT-ARG...]
-    local name=$1 dir=$2 here=$3 bypass=$4
-    shift 4
-    if [ "$name" = . ]; then
-        name=$(cly_default_profile) || {
-            echo "cly: no default profile for --teleport" >&2; return 2; }
-    elif [ -z "$name" ]; then
-        name=$(cly_profile_of_kind claude) || name=claude
-    fi
-    cly_load_profile "$name"
-    if [ "$prof_has_section" = 0 ] && [ "$name" != claude ]; then
-        cly_no_profile_error "$name"; return 2
-    fi
-    cly_resolve "$name"
-    if [ "$res_kind" != claude ]; then
-        echo "cly: --teleport supports Claude Code only; $name is of kind '$res_kind'" >&2
-        if [ "$res_kind" = codex ]; then
-            echo "cly: Mac Codex sessions are not Claude cloud sessions; Remote Control alone does not make them discoverable here" >&2
-            echo "cly: use the desktop app's Connections > Control other devices; CLI access needs a configured SSH/app-server connection" >&2
-        fi
-        return 2
-    fi
-    if ! cly_is_interactive; then
-        echo "cly: --teleport needs a terminal for Claude's cloud session picker" >&2
-        return 2
-    fi
-    if ! command -v "$res_bin" >/dev/null 2>&1; then
-        echo "cly: --teleport needs '$res_bin' on your PATH" >&2
-        return 2
-    fi
-    if [ "$here" = 1 ]; then dir=''
-    else dir=${dir:-${CLY_DIR:-}}
-    fi
-    if [ -n "$dir" ]; then
-        dir=$(cly_to_posix "$(cly_expand_tilde "$dir")")
-        [ -d "$dir" ] || { echo "cly: $dir does not exist" >&2; return 2; }
-        cd "$dir" || return 1
-    fi
-    if [ "$bypass" = 1 ]; then
-        bypass=$(cly_bypass_flag "$name" "$res_kind") || return $?
-    else bypass=''
-    fi
-    printf 'cly — teleport\n  Agent: Claude Code (claude) · Profile: %s\n\n' "$name" >&2
-    cly_exec "$res_bin" "$res_flags" "$res_env" "$bypass" --teleport "$@"
-}
-
 # --- main --------------------------------------------------------------------
 
 cly_main() {
-    local name='' target='' dir='' opt_dir='' opt_here=0 opt_x=0 opt_r=0 opt_c=0 opt_t=0
+    local name='' target='' dir='' opt_dir='' opt_here=0 opt_x=0 opt_r=0 opt_c=0
     local rc=0 dir_explicit=0 bypass='' filter='' cwd=''
     local -a agent=()
 
@@ -2052,18 +1993,12 @@ cly_main() {
             -x|--bypass)  opt_x=1; shift ;;
             -r|--resume)  opt_r=1; shift ;;
             -c|--continue) opt_r=1; opt_c=1; shift ;;
-            -t|--teleport) opt_t=1; shift ;;
             -h|--help)    cly_help; return 0 ;;
             -V|--version) echo "cly $CLY_VERSION"; return 0 ;;
             -*)           cly_unknown_option "$@"; return 2 ;;
             *)            break ;;
         esac
     done
-
-    if [ "$opt_t" = 1 ] && [ "$opt_r" = 1 ]; then
-        cly_usage_error "--teleport cannot be combined with --resume or --continue"
-        return 2
-    fi
 
     if [ $# -gt 0 ]; then
         name=$1; shift
@@ -2096,11 +2031,6 @@ cly_main() {
     esac
 
     cly_load_profile ''
-
-    if [ "$opt_t" = 1 ]; then
-        cly_teleport "$name" "$opt_dir" "$opt_here" "$opt_x" ${agent[@]+"${agent[@]}"}
-        return $?
-    fi
 
     # -r: the sessions of every agent, or of the named profile's kind. The
     # profile that reopens one is the one named, else the first of that kind,

@@ -7,7 +7,6 @@ $ cly                # a menu: claude, codex, gemini, muse, kimi, qwen, opencode
 $ cly .              # the default profile — Claude Code, in ~/claude
 $ cly -x codex       # codex, right here, with its approval prompts off
 $ cly -r             # every agent's sessions on one screen; Enter resumes the one in hand
-$ cly -t             # Claude's cloud session picker; teleport into this repository
 $ cly -x -c          # the newest session of any agent, resumed, prompts off
 ```
 
@@ -104,7 +103,6 @@ $ cly --help                # cly's help, because it is before one
 | `-x, --bypass` | skip the agent's permission prompts, with its own flag |
 | `-r, --resume` | list every agent's sessions and resume the one picked; with a `PROFILE`, only that agent's |
 | `-c, --continue` | resume the newest session without asking |
-| `-t, --teleport` | open Claude's cloud session picker and continue the selected session locally |
 | `-d, --dir DIR` | launch from `DIR`, this call only |
 | `--here` | launch from the current directory, this call only |
 | `-h, --help` | show cly's help |
@@ -142,50 +140,6 @@ Each kind's store, and what cly reads from it:
 | `qwen`, `opencode` | not listed: a per-directory tree that cannot be mapped back to a directory, and a database. `-x` still knows their flags | — |
 
 The transcripts themselves are never read — opening one costs a disk access each and they can number in the hundreds — so the list appears in about a second, and every session is on it. The screen shows `CLY_ROWS` rows at once (default 15) and scrolls; twice that many files are opened per store without an index — the newest Gemini and Kimi sessions, and the Codex directories read before the screen (the rest are read when their row is picked).
-
-## Teleporting
-
-```console
-$ cly -t                         # browse teleportable Claude cloud sessions
-$ cly -x -t                      # the same, with permission prompts skipped
-$ cly --dir ~/work/site -t        # teleport into another local checkout
-$ cly -t claude                   # use this profile's executable, flags and environment
-$ cly -t claude SESSION_ID        # teleport a known session directly
-```
-
-`-t` / `--teleport` opens **Claude Code's own authenticated remote-session picker**.
-The heading identifies the agent (`Claude Code (claude)`) and selected profile;
-all sessions in this picker are from Claude Code, not Codex or another agent.
-Claude lists the available cloud sessions, handles selection, verifies the repository,
-fetches the selected branch and loads the conversation. Cly does not read credentials
-or maintain a separate remote-session cache. This is separate from `-r`, which lists
-local sessions; `-t` cannot be combined with `-r` or `-c`.
-
-With no profile named, cly uses the first Claude profile (preferring the default), or
-bare `claude` when none exists. A named profile, including `.`, must have kind `claude`.
-Standing flags, profile environment, `CLY_BIN`, `CLY_FLAGS` and `-x` work as usual.
-Everything after the profile name is passed to Claude after `--teleport`, so a session
-ID belongs there. `cly claude --teleport` still passes the flag through unchanged and
-uses the normal profile directory rules.
-
-Teleport starts **where you are standing**, ignoring the profile's pinned memory
-directory: Claude needs a checkout of the cloud session's repository. `--dir` overrides
-`CLY_DIR`; `--here` overrides both. A missing explicit directory is an error. A terminal,
-a Claude version supporting `--teleport`, and subscription login to the same account
-are required. Claude reports login, network, repository and eligibility errors itself;
-cly preserves its exit status. Sessions that exist only in another machine's local
-history are not made teleportable by this feature.
-
-**Codex sessions on another computer:** enabling Codex Remote Control on a Mac does
-not add its sessions to this Claude picker. In the desktop app, use
-**Settings → Connections → Control other devices** to connect to the Mac. Codex's CLI
-can resume against an explicitly configured app-server endpoint (`codex --remote ADDR
-resume --all`); the installed CLI does not expose an account-wide picker of paired
-Remote Control hosts. Cly does not yet configure that host connection or move Codex
-sessions between machines. See [remote connections and chat handoff](https://learn.chatgpt.com/docs/remote-connections).
-
-See [Claude's teleport documentation](https://code.claude.com/docs/en/claude-code-on-the-web#from-cloud-to-terminal)
-for current requirements.
 
 ## Agents
 
@@ -244,7 +198,7 @@ Every line but the name is optional. A profile with no `bin=` is named after the
 
 ## Configuration
 
-Launch directory, most specific first: `--here` / `--dir`, then `CLY_DIR`, then the profile — or, when resuming, the session's own directory. Teleport ignores the profile directory and defaults to the current directory. Flags: `CLY_FLAGS`, then the profile. Executable: `CLY_BIN`, then the profile's `bin=`, then the profile's own name.
+Launch directory, most specific first: `--here` / `--dir`, then `CLY_DIR`, then the profile — or, when resuming, the session's own directory. Flags: `CLY_FLAGS`, then the profile. Executable: `CLY_BIN`, then the profile's `bin=`, then the profile's own name.
 
 | Variable | Default | Meaning |
 |---|---|---|
