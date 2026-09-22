@@ -979,6 +979,101 @@ out=$(run -c); rc=$?
 eq   'no sessions at all exits 2' 2 "$rc"
 has  'and says so' 'no sessions found' "$(err)"
 
+# --- teleport: Claude's remote picker, with the usual profile launch -----------
+
+write_config 'default=code' 'profile.code.bin=codex' \
+             'profile.cloud.bin=claude' 'profile.cloud.flags=--remote-control' \
+             "profile.cloud.dir=$pinned" 'profile.cloud.env=CLY_T_A=cloud'
+out=$(ask '' -t); rc=$?
+eq   '-t launches without local sessions' 0 "$rc"
+has  '-t uses the Claude profile even when another kind is default' 'ENV CLY_T_A=cloud' "$out"
+has  '-t stays in the caller repository instead of the pinned directory' "PWD=$here" "$out"
+args=$(printf '%s\n' "$out" | grep '^ARG=' | tr '\n' ' ')
+eq   '-t opens the native picker after standing flags' 'ARG=--remote-control ARG=--teleport ' "$args"
+out=$(ask '' --teleport)
+has  '--teleport aliases -t' 'ARG=--teleport' "$out"
+out=$(ask '' -x -t cloud session_remote --model 'a model')
+args=$(printf '%s\n' "$out" | grep '^ARG=' | tr '\n' ' ')
+eq   'teleport preserves bypass, ID and argument boundaries' \
+     'ARG=--remote-control ARG=--dangerously-skip-permissions ARG=--teleport ARG=session_remote ARG=--model ARG=a model ' "$args"
+out=$(ask '' -d "$other" -t)
+has  '-d selects the teleport checkout' "PWD=$other" "$out"
+out=$(CLY_DIR="$other" ask '' -t)
+has  'CLY_DIR selects the teleport checkout' "PWD=$other" "$out"
+out=$(CLY_DIR="$pinned" ask '' -d "$other" -t)
+has  '-d overrides CLY_DIR for teleport' "PWD=$other" "$out"
+out=$(CLY_DIR="$other" ask '' --here -d "$pinned" -t)
+has  '--here overrides both directory overrides for teleport' "PWD=$here" "$out"
+out=$(ask '' -d "$work/missing" -t); rc=$?
+eq   'a missing teleport checkout exits 2' 2 "$rc"
+hasnt 'a missing checkout never launches' 'PWD=' "$out"
+out=$(CLY_FLAGS='' ask '' -t)
+hasnt 'CLY_FLAGS can clear standing teleport flags' 'ARG=--remote-control' "$out"
+out=$(run -t); rc=$?
+eq   'teleport without a terminal exits 2' 2 "$rc"
+has  'teleport without a terminal explains why' 'needs a terminal' "$(err)"
+hasnt 'teleport without a terminal never launches' 'PWD=' "$out"
+for mode in -r -c --resume --continue; do
+    out=$(ask '' -t "$mode"); rc=$?
+    eq   "teleport rejects $mode" 2 "$rc"
+    has  "teleport explains conflict with $mode" 'cannot be combined' "$(err)"
+    hasnt "teleport conflict with $mode never launches" 'PWD=' "$out"
+done
+out=$(ask '' -r -t); rc=$?
+eq   'conflicting modes are rejected in either order' 2 "$rc"
+out=$(ask '' -t code); rc=$?
+eq   'teleport rejects a non-Claude profile' 2 "$rc"
+has  'unsupported teleport kind is explained' 'supports Claude Code only' "$(err)"
+out=$(ask '' -t .); rc=$?
+eq   'teleport dot respects a non-Claude default rather than silently switching' 2 "$rc"
+out=$(ask '' -t missing); rc=$?
+eq   'teleport rejects an unknown profile' 2 "$rc"
+out=$(run cloud --teleport)
+has  'teleport after a profile remains plain passthrough' 'ARG=--teleport' "$out"
+has  'plain passthrough retains the pinned directory' "PWD=$pinned" "$out"
+write_config 'default=second' 'profile.first.bin=claude' 'profile.first.env=CLY_T_A=first' \
+             'profile.second.bin=claude' 'profile.second.env=CLY_T_A=second'
+out=$(ask '' -t)
+has  'teleport prefers the default Claude profile' 'ENV CLY_T_A=second' "$out"
+out=$(ask '' -t first)
+has  'an explicit teleport profile wins over the default' 'ENV CLY_T_A=first' "$out"
+out=$(ask '' -t .)
+has  'teleport dot resolves the default Claude profile' 'ENV CLY_T_A=second' "$out"
+write_config 'profile.wrapped.bin=wrapper' 'profile.wrapped.kind=claude' \
+             'profile.wrapped.flags=--dangerously-skip-permissions'
+out=$(ask '' -x -t wrapped)
+args=$(printf '%s\n' "$out" | grep '^ARG=' | tr '\n' ' ')
+eq   'teleport honours kind overrides without duplicating bypass' \
+     'ARG=--dangerously-skip-permissions ARG=--teleport ' "$args"
+reset_config
+out=$(ask '' -t)
+has  'teleport works with bare Claude and no config' 'ARG=--teleport' "$out"
+[ ! -e "$CLY_CONFIG" ] && ok || bad 'teleport does not create a profile'
+out=$(ask '' -t claude)
+has  'explicit bare claude also teleports' 'ARG=--teleport' "$out"
+out=$(ask '' -t .); rc=$?
+eq   'teleport dot needs a default' 2 "$rc"
+out=$(CLY_BIN="$work/missing-agent" ask '' -t); rc=$?
+eq   'teleport reports a missing executable' 2 "$rc"
+write_config 'profile.claude.bin=codex' 'profile.claude.env=CLY_T_A=wrong'
+out=$(ask '' -t); rc=$?
+eq   'a profile merely named claude cannot silently launch a different kind' 2 "$rc"
+hasnt 'a wrong-kind fallback never launches' 'PWD=' "$out"
+reset_config
+cat > "$work/failing-agent" <<'EOF'
+#!/usr/bin/env bash
+echo 'remote session unavailable' >&2
+exit 17
+EOF
+chmod +x "$work/failing-agent"
+out=$(CLY_BIN="$work/failing-agent" ask '' -t); rc=$?
+eq   'teleport preserves agent failure status' 17 "$rc"
+has  'teleport preserves the agent diagnostic' 'remote session unavailable' "$(err)"
+out=$(run --help)
+has  'help documents teleport' '-t, --teleport' "$out"
+out=$(run)
+has  'the brief advertises teleport' 'cly -t' "$out"
+
 # --- shell hygiene ------------------------------------------------------------
 
 if command -v shellcheck >/dev/null 2>&1; then
