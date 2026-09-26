@@ -584,7 +584,7 @@ out=$(run .)
 hasnt 'without -x the flag is not there' 'dangerously' "$out"
 
 for k in claude:--dangerously-skip-permissions codex:--dangerously-bypass-approvals-and-sandbox \
-         gemini:--yolo muse:--yolo kimi:--auto qwen:--yolo opencode:--auto; do
+         antigrav:--dangerously-skip-permissions agy:--dangerously-skip-permissions gemini:--yolo muse:--yolo kimi:--auto qwen:--yolo opencode:--auto; do
     write_config 'default=k' "profile.k.bin=$stub" "profile.k.kind=${k%%:*}"
     out=$(run -x .)
     has  "-x on kind ${k%%:*} adds ${k#*:}" "ARG=${k#*:}" "$out"
@@ -677,7 +677,7 @@ out=$(ask '
 has  'with one, it is the menu' 'which agent?' "$out"
 has  'the profiles come first' '1  a         Claude Code' "$out"
 has  'the default is marked' '(default)' "$out"
-has  'the catalog follows' 'gemini    Gemini CLI   not installed: npm install -g @google/gemini-cli' "$out"
+has  'the catalog follows' 'antigrav  Antigravity' "$out"
 has  'installed tools without a profile say so' 'claude    Claude Code  installed, no profile yet' "$out"
 has  'Enter launches the default' 'ARG=--aa' "$out"
 out=$(ask '2
@@ -727,11 +727,18 @@ has  'and is the one picked' 'qwen-code' "$(err)"
 out=$(ask '/kimi
 '); rc=$?
 has  'so can one starting with k' 'kimi-code' "$(err)"
-out=$(ask '/gemini
+# Keep the missing-install branch deterministic after agy is installed locally.
+command() {
+    if [ "$#" = 2 ] && [ "$1" = -v ] && [ "$2" = agy ]; then return 1; fi
+    builtin command "$@"
+}
+export -f command
+out=$(ask '/antigrav
 '); rc=$?
+unset -f command
 eq   'a tool that is not installed exits 2' 2 "$rc"
-has  'and says what to install' 'npm install -g @google/gemini-cli' "$(err)"
-has  'and how to sign in' 'Login with Google' "$(err)"
+has  'and says what to install' 'https://antigravity.google/docs/cli/install/' "$(err)"
+has  'and how to sign in' 'agy, then follow the sign-in prompts' "$(err)"
 out=$(ask '/deepseek
 '); rc=$?
 eq   'a route whose host is missing exits 2' 2 "$rc"
@@ -885,6 +892,17 @@ has  'in its own directory' "PWD=$proja" "$out"
 args=$(printf '%s\n' "$out" | grep '^ARG=' | tr '\n' ' ')
 eq   'with the standing flags, then the resume words' "ARG=--standing ARG=--resume ARG=$c1 " "$args"
 has  'and says what it is doing' "resuming claude session ${c1:0:8} in $proja" "$(err)"
+out=$(run -x --session "claude:$c1")
+has 'explicit session uses its original directory' "PWD=$proja" "$out"
+has 'explicit session keeps profile flags' 'ARG=--standing' "$out"
+has 'explicit session applies bypass' 'ARG=--dangerously-skip-permissions' "$out"
+has 'explicit session resumes exact id' "ARG=$c1" "$out"
+out=$(run --list-sessions)
+has 'machine inventory includes session id' "$c1" "$out"
+has 'machine inventory includes original cwd' "$proja" "$out"
+out=$(run --session 'claude:missing'); rc=$?
+eq 'unknown explicit session fails' 2 "$rc"
+hasnt 'unknown explicit session never launches' 'ARG=' "$out"
 out=$(ask '3
 ' -r)
 has  'a number resumes that row' "ARG=$x1" "$out"
@@ -974,6 +992,17 @@ out=$(run -d "$projb" -c)
 has  '-d resumes there' "PWD=$projb" "$out"
 out=$(run --continue)
 has  '--continue is -c' "ARG=$c1" "$out"
+# A desktop session can have a rollout without ever entering CLI history.
+desktop_id=01a0dddd-0000-7000-8000-000000000004
+printf '%s\n' '{"timestamp":"2026-07-01T00:00:00Z","type":"session_meta","payload":{"id":"'"$desktop_id"'","cwd":"'"$projb"'"}}' > "$stores/codex/sessions/2026/09/01/rollout-2026-07-01T00-00-00-$desktop_id.jsonl"
+out=$(run --list-sessions)
+has 'desktop rollout absent from history is included' "$desktop_id" "$out"
+out=$(run -x --session "codex:$desktop_id")
+has 'desktop rollout resumes by exact id' "ARG=$desktop_id" "$out"
+has 'desktop rollout resumes in original directory' "PWD=$projb" "$out"
+rm -f "$stores/codex/history.jsonl"
+out=$(run --list-sessions)
+has 'missing history does not hide desktop sessions' "$desktop_id" "$out"
 rm -rf "$stores"
 out=$(run -c); rc=$?
 eq   'no sessions at all exits 2' 2 "$rc"
@@ -1086,6 +1115,39 @@ out=$(CLY_BIN="$failure_stub" run codex); rc=$?
 eq 'failed daemon startup fails launch' 1 "$rc"
 hasnt 'failed daemon never launches terminal' 'UNEXPECTED-LAUNCH' "$out"
 has 'failed daemon has actionable error' 'remote control could not start' "$(err)"
+
+# Antigravity is a separate CLI; legacy Gemini sessions retain their old kind.
+write_config 'profile.antigrav.bin=agy' 'profile.antigrav.kind=antigrav' "profile.antigrav.dir=$other"
+out=$(run antigrav --help)
+has 'Antigravity launches in its pinned directory' "PWD=$other" "$out"
+has 'Antigravity forwards native arguments' 'ARG=--help' "$out"
+hasnt 'Antigravity has no implicit bypass' 'dangerously' "$out"
+out=$(run --here antigrav)
+has 'Antigravity supports the current-directory override' "PWD=$here" "$out"
+write_config 'profile.codex.bin=codex' "profile.codex.dir=$other"
+out=$(run codex)
+has 'Codex launches in its pinned directory' "PWD=$other" "$out"
+write_config 'default=a' "profile.a.bin=$stub" 'profile.a.dir=none' 'profile.a.kind=claude'
+out=$(ask '
+')
+display_here=$here
+case $display_here in "$HOME") display_here='~' ;; "$HOME"/*) display_here="~${display_here#"$HOME"}" ;; esac
+[ ${#display_here} -le 40 ] || display_here="...${display_here: -37}"
+has 'unpinned menu shows actual current directory' "$display_here" "$out"
+hasnt 'menu no longer advertises Gemini for new profiles' 'Gemini CLI' "$out"
+out=$(ask '
+
+
+' init a)
+has 'setup explains current directory' "current directory: $here" "$out"
+
+reset_config
+cp "$stub" "$work/bin/agy"
+out=$(ask $'\n\n'"$other"$'\n' init antigrav); rc=$?
+eq 'Antigravity setup succeeds' 0 "$rc"
+has 'Antigravity setup selects the official executable' 'profile.antigrav.bin=agy' "$(config)"
+has 'Antigravity setup saves its kind' 'profile.antigrav.kind=antigrav' "$(config)"
+has 'Antigravity setup pins the requested directory' "profile.antigrav.dir=$other" "$(config)"
 
 # --- report -------------------------------------------------------------------
 

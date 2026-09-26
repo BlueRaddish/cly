@@ -3,7 +3,7 @@
 One command in front of every coding agent on the machine. A bare `cly` offers a menu of agents; `cly --resume` lists the sessions of all of them, newest first, and reopens the one you pick where it was born; `-x` adds the agent's own skip-the-prompts flag. A **profile** pins an executable, standing flags and a launch directory under a name, so `cly claude` starts [Claude Code](https://claude.ai/code) where its memories live whatever directory you are standing in.
 
 ```console
-$ cly                # a menu: claude, codex, gemini, muse, kimi, qwen, opencode, deepseek, meta
+$ cly                # a menu: claude, codex, antigrav, muse, kimi, qwen, opencode, deepseek, meta
 $ cly .              # the default profile — Claude Code, in ~/claude
 $ cly -x codex       # codex, right here, with its approval prompts off
 $ cly -r             # every agent's sessions on one screen; Enter resumes the one in hand
@@ -40,11 +40,11 @@ Nothing is configured by the install. The first `cly`, `cly init`, or `cly .` as
 
 ```console
 $ cly
-cly 4.1.0 — which agent?
+cly 4.3.0 — which agent?
 
     1  claude    Claude Code  installed, no profile yet
     2  codex     Codex        installed, no profile yet
-    3  gemini    Gemini CLI   not installed: npm install -g @google/gemini-cli
+    3  antigrav  Antigravity  not installed: https://antigravity.google/docs/cli/install/
     4  muse      Muse Code    installed, no profile yet
     5  kimi      Kimi Code    not installed: npm install -g @moonshot-ai/kimi-code
     6  qwen      Qwen Code    not installed: npm install -g @qwen-code/qwen-code
@@ -66,7 +66,7 @@ $ cly init claude
   launched from, so pinning one means the same memories load each time.
   Which directory should claude launch from?
   Enter a path, or press Enter to launch wherever you are standing.
-  [here] > ~/claude
+  [current directory: /home/you] > ~/claude
 ```
 
 Two questions per profile, three if the name is not something on your `PATH`. The first profile you make becomes the one `cly .` launches, and a later one never takes that over silently.
@@ -114,7 +114,7 @@ Options go **before** the profile name. Exit status is `0` when the agent was la
 
 ```console
 $ cly -r
-cly 4.1.0 — which session?                                                      1/30
+cly 4.3.0 — which session?                                                      1/30
 up/down move · type to filter · Enter resume · Esc quit · 30 of 76 · CLY_ROWS=60 shows more
     #  agent     last      where                       title
     1  claude    2m ago    ~/claude                    Upgrade cly into a funnel for multiple agents
@@ -139,7 +139,7 @@ Each kind's store, and what cly reads from it:
 | `kimi` | `~/.kimi-code/session_index.jsonl`, then each session's `state.json` for title, directory and time | `--session ID` |
 | `qwen`, `opencode` | not listed: a per-directory tree that cannot be mapped back to a directory, and a database. `-x` still knows their flags | — |
 
-The transcripts themselves are never read — opening one costs a disk access each and they can number in the hundreds — so the list appears in about a second, and every session is on it. The screen shows `CLY_ROWS` rows at once (default 15) and scrolls; twice that many files are opened per store without an index — the newest Gemini and Kimi sessions, and the Codex directories read before the screen (the rest are read when their row is picked).
+The screen shows `CLY_ROWS` rows at once (default 15) and scrolls. Codex sessions found in prompt history load their directories only when drawn, searched by directory, or picked. Desktop/imported sessions absent from history need their metadata timestamp during discovery; filenames use local time and cannot safely replace it. Metadata is read in small chunks, stopping once the directory and timestamp are available, before the large instruction body. Paths and metadata are cached for the current invocation, with no persistent cache to go stale. `--list-sessions` resolves every directory. Twice `CLY_ROWS` files are opened for the newest Gemini and Kimi sessions; those stores still have a bounded listing. See [the efficiency review](docs/efficiency.md) for measurements and remaining limits.
 
 ## Agents
 
@@ -149,7 +149,8 @@ The transcripts themselves are never read — opening one costs a disk access ea
 |---|---|---|
 | `claude` | `--dangerously-skip-permissions` | `claude`, then `/login` |
 | `codex` | `--dangerously-bypass-approvals-and-sandbox` | `codex login` |
-| `gemini` | `--yolo` | `gemini`, then pick "Login with Google" |
+| `antigrav` (`agy`) | `--dangerously-skip-permissions` | `agy`, then follow the sign-in prompts |
+| `gemini` (legacy) | `--yolo` | `gemini`, then pick "Login with Google" |
 | `kimi` | `--auto` (Never Ask) | `kimi`, then `/login` |
 | `qwen` | `--yolo` | `qwen`, then `/auth` (a key or a coding plan) |
 | `opencode` | `--auto` | `opencode auth login` |
@@ -175,6 +176,12 @@ profile.deepseek.env=ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic ANTHR
 ```
 
 Claude Code and Codex are exercised on the machine this was written on. Gemini CLI, Kimi Code, Qwen Code and OpenCode are handled from their documentation and source as of September 2026 — the flags and the store layouts — and the Ollama routes from Ollama's; the suite feeds cly stores shaped that way, but a real one may have moved. If one has, `cly -r NAME` says so by listing nothing, and the fix is one of the small functions named after the kind in `bin/cly`.
+
+Antigravity replaces Gemini in the new-profile menu and runs the official `agy` CLI.
+Existing Gemini profiles and their session history remain supported. Antigravity
+session listing is not yet supported; use its native `/resume` picker or pass
+`--conversation ID` after `cly antigrav`. Pin a launch folder with `cly init NAME`;
+unpinned menu entries show the actual current directory.
 
 ## Profiles
 
@@ -286,3 +293,7 @@ See the [cross-platform reliability review](docs/portability.md) for reproduced 
 ## License
 
 MIT
+
+### Dashboard integration
+
+Use `cly -x --session KIND:ID` to resume an exact locally available session through the same profile and directory logic as the picker. `cly --list-sessions` emits newline-delimited records with ASCII 31 between epoch, kind, ID, directory, and title. It uses the same readers and Gemini/Kimi scan limits as the picker. Consumers should sort by epoch and treat fields as data, never shell commands.

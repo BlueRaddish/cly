@@ -30,8 +30,8 @@
 # It deliberately uses shell builtins and mkdir and nothing else: the shim may
 # hand it a bash whose PATH carries no sed, awk or cygpath, and a config file
 # of key=value lines is not worth a dependency on any of them. The session
-# lists are read the same way — from each agent's own index file, never from
-# the transcripts, which cost a disk open each and can number in the hundreds.
+# lists favor each agent's index file, reading transcript metadata only when
+# needed and stopping before large instruction bodies whenever possible.
 # That takes bash 4.2 or later (associative arrays, printf's %()T): every
 # Linux, Git for Windows and MSYS2 has one; macOS ships 3.2 and needs brew's.
 
@@ -42,7 +42,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] || { [ "${BASH_VERSINFO[0]}" = 4 ] && [ "${BA
     exit 2
 fi
 
-CLY_VERSION=4.2.2
+CLY_VERSION=4.3.0
 
 # Print a here-doc without cat, which is not a builtin: the .cmd door may hand
 # this script a bash whose PATH carries no coreutils at all, and one of these
@@ -370,7 +370,7 @@ cly_is_reserved() {  # NAME
 # prompts, and the words that reopen one of its sessions by id. A profile's
 # kind is its executable's name unless profile.NAME.kind says otherwise, which
 # is how `ollama launch claude` counts as Claude Code.
-CLY_KINDS='claude codex gemini muse kimi qwen opencode'
+CLY_KINDS='claude codex antigrav gemini muse kimi qwen opencode'
 
 # The kinds whose sessions -r can list. Qwen Code and OpenCode keep theirs in
 # shapes this script cannot read (a per-directory tree it cannot map back to
@@ -385,6 +385,7 @@ cly_kind_info() {  # KIND → the three above; 1 if cly has never heard of it
     case $1 in
         claude)   kind_label='Claude Code'; kind_bypass=--dangerously-skip-permissions; kind_resume=--resume ;;
         codex)    kind_label='Codex';       kind_bypass=--dangerously-bypass-approvals-and-sandbox; kind_resume=resume ;;
+        antigrav|agy) kind_label='Antigravity'; kind_bypass=--dangerously-skip-permissions; kind_resume=--conversation ;;
         gemini)   kind_label='Gemini CLI';  kind_bypass=--yolo; kind_resume=--resume ;;
         muse)     kind_label='Muse Code';   kind_bypass=--yolo; kind_resume=resume ;;
         kimi)     kind_label='Kimi Code';   kind_bypass=--auto; kind_resume=--session ;;
@@ -398,7 +399,7 @@ cly_kind_info() {  # KIND → the three above; 1 if cly has never heard of it
 # terminal agent of their own and reach one through Ollama instead. Each entry
 # knows how to get itself and how to sign in, so picking one that is not here
 # yet prints the two lines that would make it so.
-CLY_CATALOG='claude codex gemini muse kimi qwen opencode deepseek meta'
+CLY_CATALOG='claude codex antigrav muse kimi qwen opencode deepseek meta'
 
 cat_label=''
 cat_bin=''
@@ -415,6 +416,10 @@ cly_catalog_info() {  # NAME → the six above; 1 if not in the catalog
         codex)    cat_label='Codex'; cat_bin=codex; cat_flags=$CLY_CODEX_FLAGS
                   cat_install='npm install -g @openai/codex'
                   cat_login='codex login' ;;
+        antigrav) cat_label='Antigravity'; cat_bin=agy
+                  cat_install='https://antigravity.google/docs/cli/install/'
+                  cat_login='agy, then follow the sign-in prompts' ;;
+        # Kept for explicitly named legacy profiles, outside the new-agent menu.
         gemini)   cat_label='Gemini CLI'; cat_bin=gemini; cat_flags=--yolo
                   cat_install='npm install -g @google/gemini-cli'
                   cat_login='gemini, then pick "Login with Google"' ;;
@@ -477,6 +482,7 @@ cly_is_listable() {  # KIND
 # under a second without.
 
 ses_rows=()
+declare -A codex_rollouts=() codex_cwds=() codex_times=()
 lines=()
 jv=''
 epoch=0
@@ -637,8 +643,9 @@ cly_sessions_claude() {
 cly_sessions_codex() {
     local root=${CODEX_HOME:-$HOME/.codex} line sid ts text f
     local -a order=()
-    local -A first last title rollout
-    cly_read_lines "$root/history.jsonl" || return 0
+    local -A first last title
+    codex_rollouts=(); codex_cwds=(); codex_times=()
+    cly_read_lines "$root/history.jsonl" || true
     for line in "${lines[@]}"; do
         case $line in *'"session_id":"'*) ;; *) continue ;; esac
         sid=${line#*\"session_id\":\"}; sid=${sid%%\"*}
@@ -661,11 +668,20 @@ cly_sessions_codex() {
     for f in "$root"/sessions/*/*/*/rollout-*.jsonl; do
         [ -e "$f" ] || continue
         sid=${f%.jsonl}; sid=${sid: -36}
-        rollout[$sid]=$f
+        codex_rollouts[$sid]=$f
+        # Desktop/imported sessions need not occur in the terminal prompt history.
+        if [ -z "${first[$sid]+x}" ]; then
+            # Filenames use local time, so imported sessions need the UTC
+            # timestamp from metadata. Read only its prefix, caching the cwd
+            # found alongside it. History-backed rows stay entirely lazy.
+            cly_session_cwd codex "$sid"
+            cly_epoch "${codex_times[$sid]:-}"
+            last[$sid]=$epoch; first[$sid]=$sid; order+=("$sid")
+        fi
     done
     for sid in "${order[@]}"; do
-        [ -n "${rollout[$sid]+x}" ] || continue
-        cly_add_row "${last[$sid]}" codex "$sid" '' "${title[$sid]:-${first[$sid]}}"
+        [ -n "${codex_rollouts[$sid]+x}" ] || continue
+        cly_add_row "${last[$sid]}" codex "$sid" "${codex_cwds[$sid]:-}" "${title[$sid]:-${first[$sid]}}"
     done
 }
 
@@ -808,17 +824,32 @@ cly_sessions_kimi() {
 # Where a session was born, for the kinds whose index does not say: found in
 # the session's own file, one open per row shown.
 cly_session_cwd() {  # KIND ID → jv
-    local root f line
+    local f line chunk
+    local cwd_re='"cwd"[[:space:]]*:[[:space:]]*"(([^"\\]|\\.)*)"'
+    local ts_re='.*"timestamp"[[:space:]]*:[[:space:]]*"([^"]+)"'
     jv=''
     case $1 in
         codex)
-            root=${CODEX_HOME:-$HOME/.codex}
-            for f in "$root"/sessions/*/*/*/rollout-*-"$2".jsonl; do
-                [ -s "$f" ] || continue
-                IFS= read -r line < "$f" || true
-                cly_json_str cwd "$line" && cly_json_unescape "$jv"
+            if [ -n "${codex_cwds[$2]+x}" ]; then jv=${codex_cwds[$2]}; return 0; fi
+            # Reuse discovery's path instead of walking the tree for each row.
+            f=${codex_rollouts[$2]:-}
+            if [ -s "$f" ]; then
+                # Metadata can contain tens of KB of instructions after cwd.
+                # Read chunks only until the complete JSON string is present;
+                # long/escaped paths may span chunks. Never scan later events.
+                line=''
+                while IFS= read -r -N 512 chunk || [ -n "$chunk" ]; do
+                    line+=${chunk%%$'\n'*}
+                    if [[ $line =~ $ts_re ]]; then codex_times[$2]=${BASH_REMATCH[1]}; fi
+                    if [[ $line =~ $cwd_re ]]; then
+                        cly_json_unescape "${BASH_REMATCH[1]}"
+                        [ -z "${codex_times[$2]:-}" ] || break
+                    fi
+                    [[ $chunk != *$'\n'* ]] || break
+                done < "$f"
+                codex_cwds[$2]=$jv
                 return 0
-            done ;;
+            fi ;;
     esac
 }
 
@@ -831,19 +862,29 @@ cly_sessions_all() {  # [KIND]
     done
 }
 
-# Newest first, all of them. The listers append each store oldest first, so
-# the reverse is nearly the order wanted, and an insertion sort on a nearly
-# sorted list is linear — no external sort, none needed.
+# Newest first, all of them. Stores interleave and old sessions get new
+# prompts, so insertion sort becomes quadratic. Bottom-up merge sort keeps
+# O(n log n) work without an external process. Reverse first as before so
+# equal timestamps retain the picker's existing tie order.
 cly_sort_rows() {
-    local n=${#ses_rows[@]} i j k key
-    local -a r=()
+    local n=${#ses_rows[@]} i j k width start mid end
+    local -a r=() merged=()
     for ((i = n - 1; i >= 0; i--)); do r+=("${ses_rows[i]}"); done
-    for ((i = 1; i < n; i++)); do
-        key=${r[i]}; k=${key%%"$CLY_US"*}; j=$(( i - 1 ))
-        while [ "$j" -ge 0 ] && [ "${r[j]%%"$CLY_US"*}" -lt "$k" ]; do
-            r[j + 1]=${r[j]}; j=$(( j - 1 ))
+    for ((width = 1; width < n; width *= 2)); do
+        merged=()
+        for ((start = 0; start < n; start += 2 * width)); do
+            mid=$((start + width)); [ "$mid" -le "$n" ] || mid=$n
+            end=$((start + 2 * width)); [ "$end" -le "$n" ] || end=$n
+            i=$start; j=$mid
+            for ((k = start; k < end; k++)); do
+                if [ "$i" -lt "$mid" ] && { [ "$j" -ge "$end" ] || [ "${r[i]%%"$CLY_US"*}" -ge "${r[j]%%"$CLY_US"*}" ]; }; then
+                    merged+=("${r[i]}"); i=$((i + 1))
+                else
+                    merged+=("${r[j]}"); j=$((j + 1))
+                fi
+            done
         done
-        r[j + 1]=$key
+        r=("${merged[@]}")
     done
     ses_rows=(${r[@]+"${r[@]}"})
 }
@@ -999,6 +1040,8 @@ OPTIONS
   -r, --resume    list every agent's sessions, newest first, and resume the
                   one picked; with a PROFILE, only that agent's
   -c, --continue  resume the newest session without asking
+      --session KIND:ID  resume one known session, using its profile and directory
+      --list-sessions    machine rows: epoch, kind, id, cwd, title (ASCII 31 separated)
   -d, --dir DIR   launch from DIR, this call only
       --here      launch from the current directory, this call only
   -h, --help      show this help
@@ -1027,7 +1070,7 @@ ARGUMENTS
 AGENTS
   claude codex gemini kimi  kinds -x knows the flag of and -r reads the
                             sessions of
-  muse qwen opencode        kinds -x knows the flag of; their sessions are
+  antigrav muse qwen opencode  kinds -x knows the flag of; their sessions are
                             in shapes cly cannot read, so -r skips them
   deepseek meta             routes: Claude Code through Ollama, set up from
                             the menu or by `cly init NAME`
@@ -1089,7 +1132,7 @@ cly_name_error() {  # NAME
 # How a configured directory reads at a prompt.
 cly_dir_label() {  # DIR
     case $1 in
-        ''|none|NONE) printf 'here\n' ;;
+        ''|none|NONE) printf 'current directory: %s\n' "$PWD" ;;
         *) printf '%s\n' "$1" ;;
     esac
 }
@@ -1353,7 +1396,7 @@ cly_cmd_init() {  # [NAME]
     echo "cly: setting up the profile that 'cly .' launches."
     echo
     echo "  Which tool should 'cly .' launch?"
-    echo "  Enter a name — claude, codex, gemini, kimi, whatever you run."
+    echo "  Enter a name — claude, codex, antigrav, kimi, whatever you run."
     printf '  [%s] > ' "${cfg_default:-claude}"
     IFS= read -r reply || { cly_no_answer; return 2; }
     reply=${reply%$'
@@ -1462,11 +1505,10 @@ cly_menu_build() {  # DEFAULT-NAME
         cly_load_profile "$n"
         cly_resolve "$n"
         if cly_kind_info "$res_kind"; then label=$kind_label; else label=$res_bin; fi
-        where=''
-        [ -z "$res_dir" ] || cly_where "$res_dir" 40
-        [ "$n" = "$d" ] && where="${where:-here}  (default)"
+        cly_where "${res_dir:-$PWD}" 40
+        [ "$n" = "$d" ] && where="$where  (default)"
         menu_names+=("$n")
-        printf -v line '%-9s %-12s %s' "$n" "$label" "${where:-here}"
+        printf -v line '%-9s %-12s %s' "$n" "$label" "$where"
         menu_lines+=("$line")
         cly_tint "$res_kind"; menu_tints+=("$tint"); menu_dims+=(0)
     done
@@ -1515,6 +1557,7 @@ scr_cols=80
 scr_live=0       # 1 when the screen is a terminal that can be drawn on
 scr_drawn=0      # lines the last frame took, to move back over
 scr_view=15      # rows shown at once: CLY_ROWS, within the terminal
+scr_sessions=0  # session rows hydrate their directory when first drawn
 picked_index=-1
 key=''
 
@@ -1618,7 +1661,7 @@ cly_tint() {  # KIND-OR-NAME → tint
     case $1 in
         claude)   tint=33 ;;   # yellow
         codex)    tint=32 ;;   # green
-        gemini)   tint=36 ;;   # cyan
+        antigrav|agy|gemini) tint=36 ;;   # cyan
         muse)     tint=34 ;;   # blue
         kimi)     tint=35 ;;   # magenta
         qwen)     tint=34 ;;   # blue
@@ -1644,8 +1687,14 @@ cly_screen_filter() {  # QUERY
             "$q"*) scr_match+=("$i"); continue ;;
         esac
         case ${scr_lines[i],,} in
-            *"$q"*) rest+=("$i") ;;
+            *"$q"*) rest+=("$i"); continue ;;
         esac
+        # Directory search may need off-screen metadata. Load only rows not
+        # already matched by kind/title, and retain it for later searches.
+        if [ "$scr_sessions" = 1 ]; then
+            cly_session_hydrate "$i"
+            case ${scr_lines[i],,} in *"$q"*) rest+=("$i") ;; esac
+        fi
     done
     scr_match+=(${rest[@]+"${rest[@]}"})
 }
@@ -1656,6 +1705,7 @@ cly_screen_rowtext() {  # J CUR
     local j=$1 cur=$2 i line pad w col
     w=$(( scr_cols - 1 ))
     i=${scr_match[j]}
+    [ "$scr_sessions" != 1 ] || cly_session_hydrate "$i"
     printf -v line '  %3s  %s' $(( i + 1 )) "${scr_lines[i]}"
     cly_clip "$line" "$w"
     if [ "$scr_live" != 1 ]; then
@@ -1864,6 +1914,7 @@ picked=''
 cly_menu_pick() {  # DEFAULT-NAME
     local d=$1 i n=${#menu_names[@]} start=0
     cly_screen_open
+    scr_sessions=0
     scr_lines=("${menu_lines[@]}")
     scr_keys=("${menu_names[@]}")
     scr_tint=("${menu_tints[@]}")
@@ -1883,8 +1934,7 @@ cly_menu_pick() {  # DEFAULT-NAME
 # List the sessions, let one be picked, and hand the row back in row_*.
 # $1 narrows to one kind; $2 = 1 takes the newest without asking. Every
 # session is listed; CLY_ROWS only bounds the files opened for the stores
-# that keep no index, and the Codex directories read before the screen — the
-# rest are read when their row is picked.
+# that keep no index. Codex directories are read when drawn or picked.
 cly_pick_session() {  # [KIND] [NO-ASK]
     local kind=${1:-} noask=${2:-0} n i
     cly_rows_setting
@@ -1908,13 +1958,14 @@ cly_pick_session() {  # [KIND] [NO-ASK]
         return 0
     fi
     cly_sort_rows
-    for ((i = 0; i < 2 * cly_rows && i < n; i++)); do
-        cly_row_fields "${ses_rows[i]}"
-        [ -n "$row_cwd" ] && continue
-        cly_session_cwd "$row_kind" "$row_id"; row_cwd=$jv
-        ses_rows[i]="$row_epoch$CLY_US$row_kind$CLY_US$row_id$CLY_US$row_cwd$CLY_US$row_title"
-    done
     if ! cly_is_interactive; then
+        # A printed list has no later draw; keep its bounded directory preview.
+        for ((i = 0; i < 2 * cly_rows && i < n; i++)); do
+            cly_row_fields "${ses_rows[i]}"
+            [ -n "$row_cwd" ] && continue
+            cly_session_cwd "$row_kind" "$row_id"; row_cwd=$jv
+            ses_rows[i]="$row_epoch$CLY_US$row_kind$CLY_US$row_id$CLY_US$row_cwd$CLY_US$row_title"
+        done
         echo "cly $CLY_VERSION — which session?${kind:+  ($kind only)}"
         echo
         cly_print_sessions
@@ -1939,20 +1990,35 @@ cly_pick_session() {  # [KIND] [NO-ASK]
 # The table's rows and header as the screen shows them — the same columns as
 # cly_print_sessions, without the number, which the screen adds.
 scr_header=''
-cly_session_lines() {
-    local wwhere=26 wtitle i n line
-    n=${#ses_rows[@]}
+cly_session_hydrate() {  # INDEX
+    local i=$1
+    cly_row_fields "${ses_rows[i]}"
+    if [ "$row_kind" = codex ] && [ -z "${codex_cwds[$row_id]+x}" ]; then
+        cly_session_cwd "$row_kind" "$row_id"; row_cwd=$jv
+        ses_rows[i]="$row_epoch$CLY_US$row_kind$CLY_US$row_id$CLY_US$row_cwd$CLY_US$row_title"
+        cly_session_line "$i"
+    fi
+}
+
+cly_session_line() {  # INDEX
+    local i=$1 wwhere=26 wtitle
     wtitle=$(( scr_cols - 3 - 2 - 8 - 2 - 8 - 2 - wwhere - 2 ))
     [ "$wtitle" -ge 20 ] || wtitle=20
+    cly_row_fields "${ses_rows[i]}"
+    cly_age "$row_epoch"
+    cly_where "$row_cwd" "$wwhere"
+    cly_title "$row_title" "$wtitle"
+    printf -v 'scr_lines[i]' '%-8s  %-8s  %-*s  %s' "$row_kind" "$age" "$wwhere" "${where:-?}" "$title"
+}
+
+cly_session_lines() {
+    local wwhere=26 i n
+    n=${#ses_rows[@]}
     printf -v scr_header '  %3s  %-8s  %-8s  %-*s  %s' '#' agent last "$wwhere" where title
     scr_lines=(); scr_keys=(); scr_tint=(); scr_dim=()
+    scr_sessions=1
     for ((i = 0; i < n; i++)); do
-        cly_row_fields "${ses_rows[i]}"
-        cly_age "$row_epoch"
-        cly_where "$row_cwd" "$wwhere"
-        cly_title "$row_title" "$wtitle"
-        printf -v line '%-8s  %-8s  %-*s  %s' "$row_kind" "$age" "$wwhere" "${where:-?}" "$title"
-        scr_lines+=("$line")
+        cly_session_line "$i"
         scr_keys+=("$row_kind")
         cly_tint "$row_kind"; scr_tint+=("$tint"); scr_dim+=(0)
     done
@@ -1975,6 +2041,7 @@ cly_profile_of_kind() {  # KIND
 # --- main --------------------------------------------------------------------
 
 cly_main() {
+    local session_key='' list_sessions=0 session_row found=0
     local name='' target='' dir='' opt_dir='' opt_here=0 opt_x=0 opt_r=0 opt_c=0
     local rc=0 dir_explicit=0 bypass='' filter='' cwd=''
     local -a agent=()
@@ -1993,6 +2060,10 @@ cly_main() {
             -x|--bypass)  opt_x=1; shift ;;
             -r|--resume)  opt_r=1; shift ;;
             -c|--continue) opt_r=1; opt_c=1; shift ;;
+            --list-sessions) list_sessions=1; shift ;;
+            --session)
+                [ $# -ge 2 ] || { cly_usage_error '--session needs KIND:ID'; return 2; }
+                session_key=$2; opt_r=1; shift 2 ;;
             -h|--help)    cly_help; return 0 ;;
             -V|--version) echo "cly $CLY_VERSION"; return 0 ;;
             -*)           cly_unknown_option "$@"; return 2 ;;
@@ -2032,6 +2103,17 @@ cly_main() {
 
     cly_load_profile ''
 
+    if [ "$list_sessions" = 1 ]; then
+        cly_rows_setting
+        cly_sessions_all
+        for session_row in "${ses_rows[@]}"; do
+            cly_row_fields "$session_row"
+            if [ -z "$row_cwd" ]; then cly_session_cwd "$row_kind" "$row_id"; row_cwd=$jv; fi
+            printf '%s\037%s\037%s\037%s\037%s\n' "$row_epoch" "$row_kind" "$row_id" "$row_cwd" "$row_title"
+        done
+        return 0
+    fi
+
     # -r: the sessions of every agent, or of the named profile's kind. The
     # profile that reopens one is the one named, else the first of that kind,
     # else the bare agent.
@@ -2055,7 +2137,26 @@ cly_main() {
                 return 2
             fi
         fi
-        cly_pick_session "$filter" "$opt_c" || return $?
+        if [ -n "$session_key" ]; then
+            cly_rows_setting
+            # An exact selection cannot need any other agent's store.
+            case $session_key in
+                *:*) ;;
+                *) cly_usage_error '--session needs KIND:ID'; return 2 ;;
+            esac
+            if [ -n "$filter" ] && [ "$filter" != "${session_key%%:*}" ]; then
+                echo 'cly: session not found' >&2; return 2
+            fi
+            cly_sessions_all "${session_key%%:*}"
+            for session_row in "${ses_rows[@]}"; do
+                cly_row_fields "$session_row"
+                if [ "$row_kind:$row_id" = "$session_key" ]; then found=1; break; fi
+            done
+            [ "$found" = 1 ] || { echo 'cly: session not found' >&2; return 2; }
+            if [ -z "$row_cwd" ]; then cly_session_cwd "$row_kind" "$row_id"; row_cwd=$jv; fi
+        else
+            cly_pick_session "$filter" "$opt_c" || return $?
+        fi
         [ "$picked_bypass" = 1 ] && opt_x=1
         cwd=$row_cwd
         # The profile named, if it is one; else the first of the row's kind.
