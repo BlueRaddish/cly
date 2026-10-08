@@ -351,10 +351,12 @@ with tempfile.TemporaryDirectory(prefix="cly-workflows-") as temporary:
                 if "batch_reports" in kwargs["input"]:
                     return subprocess.CompletedProcess(command, 0, json.dumps({"notes": merged["notes"]}), "")
                 return subprocess.CompletedProcess(command, 0, '{"notes":[]}', "")
-            with patch.object(w.subprocess, "run", side_effect=plan_model):
+            with patch.object(w, "CATCH_UP_BYTES", 5000), patch.object(w.subprocess, "run", side_effect=plan_model):
                 generated, count = w.catch_up(batch_index, "codex-test", filing_plan=True)
             check(count == 3 and w.read(generated)["source_revisions"] == revisions)
             check(len(w.pending(batch_index, "filed_revision")) == 3)
+            with redirect_stderr(io.StringIO()):
+                check(w.main(["document", "catch-up", "--batch-bytes", "1"]) == 1)
 
         with patch.dict(os.environ, CLY_CONFIG="/a path/it's;$not-code", PRIVATE_TOKEN="never-copy"), patch.object(w.shutil, "which", return_value="available"):
             commands = w.terminal_commands(w.restore_plan(saved, query=False), "wt")
