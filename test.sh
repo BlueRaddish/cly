@@ -1043,7 +1043,7 @@ out=$(ask $'\n\n' init muse)
 has 'Muse init saves bypass default' 'profile.muse.flags=--yolo' "$(config)"
 out=$(run -x muse resume test-session)
 eq 'Muse bypass is not duplicated' 1 "$(printf '%s\n' "$out" | grep -c '^ARG=--yolo$')"
-has 'Muse native resume passes through' $'ARG=resume\nARG=test-session' "$out"
+has 'Muse native resume places flags after the subcommand' $'ARG=resume\nARG=--yolo\nARG=test-session' "$out"
 
 # Defaults are written by init, but explicit existing flags remain authoritative.
 for spec in gemini:--yolo kimi:--auto qwen:--yolo opencode:--auto; do

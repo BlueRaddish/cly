@@ -24,10 +24,11 @@
 # the agent's. Neither can claim the other's flags, which is why nothing here
 # needs a --cly- prefix.
 #
-# This is the whole program. bash, MSYS2 and WSL run it directly; PowerShell
+# This is the launcher. bash, MSYS2 and WSL run it directly; PowerShell
 # and cmd reach it through the cly.cmd shim beside it. Install with install.sh.
 #
-# It deliberately uses shell builtins and mkdir and nothing else: the shim may
+# The launcher uses shell builtins and mkdir; optional snapshot/document
+# management lives in lib/cly and needs Python 3.9+. The shim may
 # hand it a bash whose PATH carries no sed, awk or cygpath, and a config file
 # of key=value lines is not worth a dependency on any of them. The session
 # lists favor each agent's index file, reading transcript metadata only when
@@ -43,6 +44,8 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] || { [ "${BASH_VERSINFO[0]}" = 4 ] && [ "${BA
 fi
 
 CLY_VERSION=4.3.0
+CLY_SOURCE=${BASH_SOURCE[0]}
+case $CLY_SOURCE in /*|[A-Za-z]:*) ;; *) CLY_SOURCE=$PWD/$CLY_SOURCE ;; esac
 
 # Print a here-doc without cat, which is not a builtin: the .cmd door may hand
 # this script a bash whose PATH carries no coreutils at all, and one of these
@@ -62,7 +65,7 @@ CLY_CODEX_FLAGS='--remote-control --dangerously-bypass-approvals-and-sandbox'
 CLY_V2_FLAGS='--remote-control --dangerously-skip-permissions'
 
 # A profile may not take one of these names: the first word means these first.
-CLY_RESERVED='. init config help version'
+CLY_RESERVED='. init config help version snapshot document'
 
 # Field separator inside a session row. Never appears in a path or a prompt.
 CLY_US=$'\x1f'
@@ -1013,6 +1016,8 @@ cly — one command in front of every coding agent
 
 usage: cly [OPTION...] [PROFILE|.] [AGENT-ARG...]
        cly init [NAME] | cly config | cly help | cly version
+       cly snapshot [save|list|status|restore DATE|bind|adopt]
+       cly document [capture|status|start|stop|catch-up|import|publish]
 
 A profile is a name with an executable, flags and a launch directory of its
 own. The first word is always cly's, and everything after the profile name is
@@ -1034,6 +1039,9 @@ COMMANDS
   config       show what is configured, and what would run
   help         show this help
   version      show the version
+  snapshot     save active managed sessions; restore by UTC date or ID
+  document     collect session prose; review and publish with separate receipts
+               snapshot/document need Python 3.9+; use COMMAND --help
 
 OPTIONS
   -x, --bypass    skip the agent's permission prompts, with its own flag
@@ -1290,11 +1298,63 @@ cly_resolve() {  # NAME
 
 # --- launching ---------------------------------------------------------------
 
+# Shared by launch and workflow preflight: Bash needs Windows paths converted
+# before command -v and may need an explicit .cmd suffix.
+cly_find_executable() {  # BIN -> workflow_executable
+    workflow_executable=$1
+    case ${OSTYPE:-} in
+        msys*|mingw*|cygwin*)
+            case $workflow_executable in
+                [A-Za-z]:[/\\]*) workflow_executable=$(cly_to_posix "$workflow_executable") ;;
+            esac ;;
+    esac
+    if command -v "$workflow_executable" >/dev/null 2>&1; then return 0; fi
+    case ${OSTYPE:-} in
+        msys*|mingw*|cygwin*)
+            workflow_executable+=.cmd
+            command -v "$workflow_executable" >/dev/null 2>&1 ;;
+        *) return 1 ;;
+    esac
+}
+
+cly_python() {
+    local candidate
+    for candidate in "${CLY_PYTHON:-}" python3 python; do
+        [ -n "$candidate" ] || continue
+        if command -v "$candidate" >/dev/null 2>&1; then
+            if "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 9))' >/dev/null 2>&1; then
+                workflow_python=$candidate
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+cly_workflow() {
+    local workflow_python='' base=${CLY_SOURCE%/*} script
+    if ! cly_python; then
+        echo 'cly: snapshot/document need Python 3.9+; set CLY_PYTHON to its executable' >&2
+        return 2
+    fi
+    script=$(cd "$base/../lib/cly" && pwd)/workflows.py
+    case ${OSTYPE:-} in msys*|cygwin*) case $script in /?/*) script=${script:1:1}:${script:2} ;; esac ;; esac
+    if [ -z "${CLY_SHELL:-}" ]; then
+        CLY_SHELL=$BASH
+        case ${OSTYPE:-} in
+            msys*|cygwin*)
+                if command -v cygpath >/dev/null 2>&1; then CLY_SHELL=$(cygpath -am "$BASH"); fi ;;
+        esac
+    fi
+    export CLY_SHELL
+    exec "$workflow_python" "$script" "$@"
+}
+
 # Everything a launch and a resume have in common: the environment, then exec.
 # FLAGS is deliberately unquoted where it is used: it is a list of arguments.
 cly_exec() {  # BIN FLAGS ENV BYPASS ARG...
     local bin=$1 flags=$2 env=$3 bypass=$4 kv k v n flag remote=0 kimi_auto=0
-    local remote_resume=0 omitted=0
+    local remote_resume=0 omitted=0 skip_remote_value=0
     local -a launch_flags=()
     shift 4
     # shellcheck disable=SC2086
@@ -1314,6 +1374,7 @@ cly_exec() {  # BIN FLAGS ENV BYPASS ARG...
         esac
         export "$k=$v"
     done
+    if cly_find_executable "$bin"; then bin=$workflow_executable; fi
     # A remote Codex resume inherits the server session's permissions. Keep
     # cly's own bypass separate from native arguments so only our defaults
     # and -x are suppressed; explicit agent arguments remain untouched.
@@ -1340,12 +1401,33 @@ cly_exec() {  # BIN FLAGS ENV BYPASS ARG...
         if [ "$kimi_auto" = 1 ]; then
             case $flag in --yolo|-y|--yes|--auto-approve) continue ;; esac
         fi
+        if [ "${CLY_DOCUMENT_JOB:-0}" = 1 ]; then
+            # Headless review cannot start or attach a remote interactive TUI.
+            if [ "$skip_remote_value" = 1 ]; then skip_remote_value=0; continue; fi
+            case $flag in
+                --remote) skip_remote_value=1; continue ;;
+                --remote-control|--remote=*|--dangerously-bypass-approvals-and-sandbox|--dangerously-skip-permissions|--yolo|-y) continue ;;
+            esac
+        fi
         if [ "$res_kind" = codex ] && [ "$flag" = --remote-control ]; then
             remote=1
         else
             launch_flags+=("$flag")
         fi
     done
+    if [ "${CLY_WORKFLOW_QUERY:-0}" = 1 ]; then
+        command -v "$bin" >/dev/null 2>&1 || { echo "cly: executable unavailable: $bin" >&2; return 1; }
+        local workflow_python='' store=''
+        if cly_python; then
+            local base=${CLY_SOURCE%/*} module
+            module=$(cd "$base/../lib/cly" && pwd)/store_path.py
+            case ${OSTYPE:-} in msys*|cygwin*) case $module in /?/*) module=${module:1:1}:${module:2} ;; esac ;; esac
+            # Query the exported profile's native store without persisting env.
+            store=$("$workflow_python" "$module" "$res_kind") || return $?
+        fi
+        printf '%s\0%s\0%s\0' "$res_kind" "$bin" "$store"
+        return 0
+    fi
     if [ "$remote" = 1 ]; then
         "$bin" remote-control start || {
             echo "cly: Codex remote control could not start; session not launched" >&2
@@ -1356,7 +1438,24 @@ cly_exec() {  # BIN FLAGS ENV BYPASS ARG...
     if [ "$omitted" = 1 ]; then
         echo "cly: remote Codex resume keeps the session's permissions; bypass applies to new sessions" >&2
     fi
-    exec "$bin" "${launch_flags[@]}" ${bypass:+"$bypass"} "$@"
+    local -a final_command=("$bin" "${launch_flags[@]}")
+    [ -z "$bypass" ] || final_command+=("$bypass")
+    if [ "$res_kind" = muse ] && [ "${1:-}" = resume ]; then
+        # Muse's flags belong to the selected subcommand.
+        final_command=("$bin" resume "${launch_flags[@]}")
+        [ -z "$bypass" ] || final_command+=("$bypass")
+        shift
+    fi
+    final_command+=("$@")
+    if [ "${CLY_TRACK:-auto}" != 0 ] && { [ -z "${CLY_BIN:-}" ] || [ "${CLY_TRACK:-auto}" = 1 ]; } && [ "${CLY_DOCUMENT_JOB:-0}" != 1 ]; then
+        local workflow_python=''
+        if cly_python; then
+            cly_workflow run --profile "$name" --kind "$res_kind" --bypass "$opt_x" -- "${final_command[@]}"
+            return $?
+        fi
+        [ "${CLY_TRACK:-auto}" != 1 ] || { echo 'cly: CLY_TRACK=1 requires Python 3.9+' >&2; return 2; }
+    fi
+    exec "${final_command[@]}"
 }
 
 # The one flag -x adds — nothing, when the profile's standing flags already
@@ -2079,6 +2178,7 @@ cly_main() {
     case $name in
         help)    cly_help; return 0 ;;
         version) echo "cly $CLY_VERSION"; return 0 ;;
+        snapshot|document) cly_workflow "$name" "$@"; return $? ;;
         init)
             if [ $# -gt 1 ]; then
                 cly_usage_error "init takes one name, and '$2' would be dropped — flags are asked for, not given here"
