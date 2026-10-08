@@ -621,7 +621,7 @@ def catch_up(index, profile=None, model=None, filing_plan=False):
     if filing_plan:
         lines += ["Return only one JSON object, no Markdown fences: {\"notes\":[{\"path\":\"3-Resources/example.md\",\"content\":\"complete Markdown note\",\"sources\":[{\"agent\":\"codex\",\"session_id\":\"native-id\"}]}]}.",
                   "Propose NEW curated PARA notes only. Do not replace READMEs or existing notes. Use established project associations only; use 0-Inbox when uncertain.",
-                  "Each note needs YAML frontmatter with date: " + now()[:10] + ", a meaningful title, at least one source identity, and useful confirmed findings or explicitly labeled proposals. Omit tags unless their allowed vocabulary is established. Existing-note reconciliation needs human review.",
+                  "Each note needs YAML frontmatter with an ISO date from its source metadata, a meaningful title, at least one source identity, and useful confirmed findings or explicitly labeled proposals. Omit tags unless their allowed vocabulary is established. Existing-note reconciliation needs human review.",
                   "Use one destination per case-insensitive path; merge overlapping findings. A batch with no durable finding may return an empty notes array.", ""]
     header = "\n".join(lines)
     packet = library() / "catch-up.md"
