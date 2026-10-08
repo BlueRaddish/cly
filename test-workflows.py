@@ -366,4 +366,213 @@ with tempfile.TemporaryDirectory(prefix="cly-workflows-") as temporary:
             commands = w.terminal_commands(w.restore_plan(saved, query=False), "gnome-terminal")
             check("export CLY_CONFIG=" in commands[0][-len(w.restore_plan(saved, query=False)[0]["argv"]) - 2])
 
+
+
+# Provider format boundaries and mocked model failure/retry regressions.
+def source_boundary_checks(temp):
+    checks = 0
+
+    def check(condition):
+        nonlocal checks
+        assert condition
+        checks += 1
+
+    def jsonl(path, rows):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
+        return path
+
+    def row(sid="one", content="visible", ident="u", cwd="/project"):
+        return {"sessionId": sid, "cwd": cwd, "timestamp": "2026-10-08T12:00:00Z", "uuid": ident,
+                "message": {"role": "user", "content": content}}
+
+    def codex_meta(sid="one"):
+        return {"type": "session_meta", "payload": {"id": sid, "cwd": "/project", "timestamp": "2026-10-08T12:00:00Z"}}
+
+    # Known public channels/phases and legacy unset values remain supported.
+    root = temp / "public"
+    records = [codex_meta()]
+    public = ({}, {"channel": "commentary"}, {"channel": "final"}, {"phase": "commentary"}, {"phase": "final_answer"})
+    for i, fields in enumerate(public):
+        records.append({"type": "response_item", "payload": dict(fields, type="message", role="assistant", id=str(i), content="public " + str(i))})
+    for i, fields in enumerate(({"channel": "reasoning"}, {"phase": "future_reasoning"}, {"channel": "analysis"}, {"phase": "summary"})):
+        records.append({"type": "response_item", "payload": dict(fields, type="message", role="assistant", id="private" + str(i), content="PRIVATE_REASONING")})
+    records.extend([
+        {"type": "response_item", "payload": {"type": "function_call_output", "role": "tool", "content": {"unsupported": "TOOL_OUTPUT"}}},
+        {"type": "response_item", "payload": {"type": "reasoning", "role": "assistant", "content": "PRIVATE_REASONING"}},
+        {"type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "AgentMessage", "id": "legacy", "content": [{"type": "Text", "text": "legacy public"}]}}},
+        {"type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "AgentMessage", "id": "private-event", "phase": "reasoning", "content": "PRIVATE_REASONING"}}},
+    ])
+    jsonl(root / "sessions/2026/10/08/rollout-one.jsonl", records)
+    items, errors = s.discover("codex", root)
+    check(not errors and len(items) == 1)
+    check(len(items[0]["messages"]) == len(public) + 1)
+    check("PRIVATE_REASONING" not in json.dumps(items) and "TOOL_OUTPUT" not in json.dumps(items))
+
+    # Multiple identities inside a single file cannot be merged into the first.
+    for kind in ("claude", "codex", "qwen"):
+        root = temp / ("mixed-" + kind)
+        records = [row("one"), row("two", "second", "v")] if kind != "codex" else [codex_meta("one"), codex_meta("two")]
+        relative = "sessions/2026/10/08/rollout-one.jsonl" if kind == "codex" else "projects/hash/one.jsonl"
+        jsonl(root / relative, records)
+        items, errors = s.discover(kind, root)
+        check(not items and any("Conflicting native session identities" in e for e in errors))
+
+    # Sidechain and metadata-only entries are deliberately not prose failures.
+    root = temp / "metadata"
+    jsonl(root / "projects/hash/empty.jsonl", [{"sessionId": "empty", "cwd": "/project", "timestamp": "2026-10-08T12:00:00Z", "type": "progress"}])
+    jsonl(root / "projects/hash/child.jsonl", [dict(row("child", "private sidechain"), isSidechain=True)])
+    jsonl(root / "projects/hash/tool.jsonl", [dict(row("tool", ""), message={"role": "assistant", "content": None, "tool_calls": [{"secret": "tool"}]})])
+    items, errors = s.discover("claude", root)
+    check(not errors and {i["session_id"] for i in items} == {"empty", "tool"})
+    check(all(not item["messages"] for item in items))
+
+    # Unknown user/assistant formats report coverage failures rather than success.
+    for kind in ("claude", "codex", "gemini"):
+        root = temp / ("unsupported-" + kind)
+        if kind == "claude":
+            records = [dict(row(), message={"role": "user", "parts_v2": [{"text": "important"}]})]
+            jsonl(root / "projects/hash/one.jsonl", records)
+        elif kind == "codex":
+            jsonl(root / "sessions/2026/10/08/rollout-one.jsonl", [codex_meta(), {"type": "conversation_v2", "payload": {"role": "user", "text": "important"}}])
+        else:
+            path = root / "tmp/hash/chats/session-one.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps({"sessionId": "one", "startTime": "2026-10-08T12:00:00Z", "messages": [{"type": "user", "parts_v2": [{"text": "important"}]}]}), encoding="utf-8")
+        items, errors = s.discover(kind, root)
+        check(not items and any("Unsupported conversation" in e for e in errors))
+    for content in ({"parts_v2": ["important"]}, [{"type": "future_text", "text": "important"}], [{"type": "text", "text": 3}]):
+        root = temp / ("shape-" + str(checks))
+        jsonl(root / "projects/hash/one.jsonl", [row(content=content)])
+        items, errors = s.discover("claude", root)
+        check(not items and bool(errors))
+    check(s.message_prose({"role": "tool", "content": {"unknown": "secret"}}) is None)
+    check(s.prose("assistant", [{"type": "thinking", "thinking": "private"}, {"type": "tool_use", "id": "tool"}, {"type": "text", "text": "한글 café 🙂"}]) == {"role": "assistant", "content": "한글 café 🙂"})
+
+    # Duplicate copies/prefixes dedup, but conflicting source metadata/prose do not.
+    root = temp / "duplicates-valid"
+    jsonl(root / "projects/a/one.jsonl", [row()])
+    jsonl(root / "projects/b/two.jsonl", [row(), row(content="more", ident="v")])
+    items, errors = s.discover("claude", root)
+    check(not errors and len(items) == 1 and len(items[0]["messages"]) == 2)
+    for conflict in (row(cwd="/other"), dict(row(), timestamp="2026-10-09T12:00:00Z"), row(content="different")):
+        root = temp / ("duplicate-conflict-" + str(checks))
+        jsonl(root / "projects/a/one.jsonl", [row()])
+        jsonl(root / "projects/b/two.jsonl", [conflict])
+        jsonl(root / "projects/c/three.jsonl", [row()])
+        items, errors = s.discover("claude", root)
+        check(not items and any("conflicting duplicate native session ID" in e for e in errors))
+
+    # Incomplete-tail status reaches capture callers; completed prefixes remain
+    # readable. Metadata-only checks do not need to materialize conversation tails.
+    root = temp / "partial"
+    path = jsonl(root / "projects/hash/one.jsonl", [row()])
+    path.write_bytes(path.read_bytes() + b'{"message":')
+    items, errors = s.discover("claude", root)
+    check(not errors and items[0].get("_incomplete") is True and len(items[0]["messages"]) == 1)
+    status = {}
+    check(len(list(s.read_records(path, status))) == 1 and status.get("incomplete") is True)
+    path.write_bytes(path.read_bytes() + b"\nbad\n")
+    items, errors = s.discover("claude", root)
+    check(not items and any("Malformed JSON" in e for e in errors))
+    return checks
+
+
+with tempfile.TemporaryDirectory(prefix="cly-source-checks-") as temporary:
+    checks += source_boundary_checks(Path(temporary))
+
+def catch_fixture(folder, contents):
+    os.environ["CLY_LIBRARY_HOME"] = str(folder / "library")
+    os.environ["CLY_STATE_HOME"] = str(folder / "state")
+    index = {"schema": 1, "sessions": {}, "errors": []}
+    for i, content in enumerate(contents):
+        item = {"agent": "codex", "session_id": "regression-" + str(i), "started": "2026-10-08T10:00:00+00:00",
+                "directory": str(folder), "title": "Regression", "messages": [{"role": "user", "content": content}]}
+        w.store_session(item, index)
+    w.atomic(w.library() / "index.json", index)
+    return index
+
+
+def queried(command, kwargs):
+    return kwargs.get("env", {}).get("CLY_WORKFLOW_QUERY") == "1"
+
+
+with tempfile.TemporaryDirectory(prefix="cly-catch-up-") as temporary, patch.dict(os.environ, {}), patch.object(w, "bash", return_value="stub-bash"):
+    base = Path(temporary)
+    index = catch_fixture(base / "empty", ["ordinary prose"])
+    model_calls = []
+    def empty_model(command, **kwargs):
+        if queried(command, kwargs):
+            return subprocess.CompletedProcess(command, 0, "codex\0stub\0store\0", "")
+        model_calls.append(kwargs["input"])
+        return subprocess.CompletedProcess(command, 0, '{"notes":[]}', "")
+    with patch.object(w.subprocess, "run", side_effect=empty_model):
+        path, count = w.catch_up(index, "audit", "chosen", True)
+        first_calls = len(model_calls)
+        again, again_count = w.catch_up(index, "audit", "chosen", True)
+    proposal = w.read(path)
+    check(proposal["notes"] == [] and proposal["outcome"] == "no-findings" and count == again_count == 1)
+    check(len(model_calls) == first_calls == 1 and w.read(again)["outcome"] == "no-findings")
+    check(all("filed_revision" not in record and "reviewed_revision" not in record for record in index["sessions"].values()))
+
+    with patch.object(w, "CATCH_UP_BYTES", 3000):
+        text = "Unicode α\n\u0001" * 2000
+        index = catch_fixture(base / "fragments", [text])
+        model_calls.clear()
+        with patch.object(w.subprocess, "run", side_effect=empty_model):
+            path, count = w.catch_up(index, "audit", "chosen", True)
+            first_calls = len(model_calls)
+            w.catch_up(index, "audit", "chosen", True)
+        check(first_calls > 1 and len(model_calls) == first_calls)
+        parts = [json.loads(prompt.split("<session-data>\n", 1)[1].rsplit("\n</session-data>", 1)[0]) for prompt in model_calls]
+        pieces = [message for part in parts for message in part["messages"]]
+        check("".join(piece["content"] for piece in pieces) == text)
+        check(all(len(prompt.encode()) <= 3000 for prompt in model_calls))
+        check(w.read(path)["outcome"] == "no-findings")
+
+        index = catch_fixture(base / "batch-retry", ["x" * 1600, "y" * 1600, "z" * 1600])
+        attempts, fail_second = [], True
+        def batch_model(command, **kwargs):
+            if queried(command, kwargs):
+                return subprocess.CompletedProcess(command, 0, "codex\0stub\0store\0", "")
+            attempts.append(kwargs["input"])
+            if fail_second and len(attempts) == 2:
+                return subprocess.CompletedProcess(command, 1, "", "interrupted")
+            return subprocess.CompletedProcess(command, 0, "# Compact review\n", "")
+        with patch.object(w.subprocess, "run", side_effect=batch_model):
+            fails(lambda: w.catch_up(index, "audit", "chosen"), "pending revisions kept")
+            check(sum("review_batch_receipt" in record for record in index["sessions"].values()) == 1)
+            check(not any("reviewed_revision" in record for record in index["sessions"].values()))
+            first_prompt = attempts[0]
+            fail_second = False
+            report, count = w.catch_up(index, "audit", "chosen")
+        check(attempts.count(first_prompt) == 1 and count == 3)
+        check(not w.pending(index, "reviewed_revision") and report.is_file())
+
+    index = catch_fixture(base / "malformed-cache", ["ordinary prose"])
+    calls = []
+    def plain_model(command, **kwargs):
+        if queried(command, kwargs):
+            return subprocess.CompletedProcess(command, 0, "codex\0stub\0store\0", "")
+        calls.append(kwargs["input"])
+        return subprocess.CompletedProcess(command, 0, "# Review\n", "")
+    with patch.object(w.subprocess, "run", side_effect=plain_model):
+        w.catch_up(index, "audit", "chosen")
+        key, record = next(iter(index["sessions"].items()))
+        del record["reviewed_revision"]
+        receipt_path = w.library() / record["review_batch_receipt"]["receipt"]
+        receipt = w.read(receipt_path)
+        receipt["source_revisions"] = []
+        w.atomic(receipt_path, receipt)
+        w.catch_up(index, "audit", "chosen")
+        check(len(calls) == 2)
+        del record["reviewed_revision"]
+        item_path = w.library() / "sessions" / (key + ".json")
+        item = w.read(item_path)
+        item["messages"][0]["content"] += " changed"
+        w.atomic(item_path, item)
+        before = len(calls)
+        fails(lambda: w.catch_up(index, "audit", "chosen"), "revision mismatch")
+        check(len(calls) == before)
+
 print(f"workflow checks: {checks} passed (fixtures + managed-process integration; no live agents or terminals)")

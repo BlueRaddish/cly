@@ -7,6 +7,7 @@ source <(sed '/^cly_main "\$@"/,$d' "${1:-$self_dir/bin/cly}")
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 export CODEX_HOME="$work/codex"
+export CLY_SESSION_READER=bash
 mkdir -p "$CODEX_HOME/sessions/2026/09/01"
 check() { if ! "$@"; then printf 'FAIL: %s\n' "$*" >&2; exit 1; fi; }
 

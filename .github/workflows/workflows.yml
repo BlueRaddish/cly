@@ -18,6 +18,14 @@ jobs:
           echo "CLY_SHELL=$(brew --prefix)/bin/bash" >> "$GITHUB_ENV"
       - name: Provider fixtures and lifecycle integration
         run: python test-workflows.py
+      - name: Document collection and filing command integration
+        run: python test-document-pipeline.py
+      - name: Session discovery and name lookup
+        run: |
+          python test-session-discovery.py
+          python test-session-list.py
+      - name: Portable handoffs and capture health
+        run: python test-handoffs-health.py
       - name: Launcher checks
         if: runner.os == 'Linux'
         run: |

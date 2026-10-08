@@ -15,6 +15,9 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 export CLY_CONFIG="$work/config"
+# Exercise the dependency-free fallback; test-session-list.py covers the
+# default profile-aware Python inventory and the normal launcher boundary.
+export CLY_SESSION_READER=bash
 stub="$work/agent-stub"
 cat > "$stub" <<'EOF'
 #!/usr/bin/env bash
@@ -598,6 +601,9 @@ has  'the kind follows the executable' 'ARG=--dangerously-bypass-approvals-and-s
 write_config 'default=c' 'profile.c.bin=C:\tools\claude.exe'
 out=$(run -x .)
 has  'even through a Windows path' 'ARG=--dangerously-skip-permissions' "$out"
+write_config 'default=c' 'profile.c.bin=C:\tools\muse.cmd'
+out=$(run -x .)
+has  'a Windows cmd launcher keeps the Muse kind' 'ARG=--yolo' "$out"
 
 write_config 'default=z' "profile.z.bin=$stub"
 out=$(run -x .); rc=$?
@@ -737,12 +743,52 @@ out=$(ask '/antigrav
 '); rc=$?
 unset -f command
 eq   'a tool that is not installed exits 2' 2 "$rc"
-has  'and says what to install' 'https://antigravity.google/docs/cli/install/' "$(err)"
+has  'and says what to install' 'https://antigravity.google/cli/install.' "$(err)"
 has  'and how to sign in' 'agy, then follow the sign-in prompts' "$(err)"
 out=$(ask '/deepseek
 '); rc=$?
 eq   'a route whose host is missing exits 2' 2 "$rc"
 has  'and names the host' 'ollama' "$(err)"
+
+# Bash sets OSTYPE at startup. BASH_ENV supplies another value for each run so
+# the same missing-tool branch can be checked without owning three machines.
+cat > "$work/os-env" <<'EOF'
+OSTYPE=$CLY_TEST_OSTYPE
+command() {
+    if [ "$1" = -v ]; then
+        case ${2%.cmd} in claude|codex|agy|gemini|muse|kimi|qwen|opencode|ollama) return 1 ;; esac
+    fi
+    builtin command "$@"
+}
+EOF
+install_hint() {  # OSTYPE AGENT
+    CLY_ASSUME_TTY=1 CLY_TEST_OSTYPE=$1 BASH_ENV="$work/os-env" "$cly" "$2" </dev/null 2>&1
+}
+reset_config
+out=$(install_hint darwin23 codex)
+has 'macOS Codex uses native installer' 'https://chatgpt.com/codex/install.sh | sh' "$out"
+hasnt 'macOS Codex does not ask for npm' 'npm install' "$out"
+out=$(install_hint darwin23 gemini)
+has 'macOS Gemini offers Homebrew' 'brew install gemini-cli' "$out"
+out=$(install_hint darwin23 opencode)
+has 'macOS OpenCode offers Homebrew' 'brew install anomalyco/tap/opencode' "$out"
+out=$(install_hint darwin23 qwen)
+has 'macOS Qwen uses standalone installer' 'install-qwen-standalone.sh | bash' "$out"
+out=$(install_hint msys codex)
+has 'Windows Codex names PowerShell installer' 'PowerShell: irm https://chatgpt.com/codex/install.ps1 | iex' "$out"
+out=$(install_hint msys qwen)
+has 'Windows Qwen uses PowerShell installer' 'install-qwen-standalone.ps1 | iex' "$out"
+out=$(install_hint msys muse)
+has 'Windows Muse uses the official PowerShell installer' 'PowerShell: irm https://dev.meta.ai/install.ps1 | iex' "$out"
+out=$(install_hint msys gemini)
+has 'Windows Gemini names Node prerequisite' 'Node.js 20+, then: npm install -g @google/gemini-cli' "$out"
+out=$(install_hint linux-gnu opencode)
+has 'Linux OpenCode uses native installer' 'https://opencode.ai/install | bash' "$out"
+out=$(install_hint linux-gnu meta)
+has 'Linux Llama includes model pull' 'ollama pull llama3.1' "$out"
+out=$(printf '\e' | COLUMNS=160 CLY_ASSUME_TTY=1 CLY_TEST_OSTYPE=darwin23 BASH_ENV="$work/os-env" "$cly" 2>/dev/null)
+has 'menu uses the same macOS install hint' 'brew install anomalyco/tap/opencode' "$out"
+has 'menu keeps long installer hints readable' 'not installed: native installer; Enter for command' "$out"
 
 # With ollama on the PATH, the DeepSeek route sets itself up with Claude Code's
 # kind, so -x and -r treat it as Claude Code.
@@ -1043,7 +1089,51 @@ out=$(ask $'\n\n' init muse)
 has 'Muse init saves bypass default' 'profile.muse.flags=--yolo' "$(config)"
 out=$(run -x muse resume test-session)
 eq 'Muse bypass is not duplicated' 1 "$(printf '%s\n' "$out" | grep -c '^ARG=--yolo$')"
-has 'Muse native resume places flags after the subcommand' $'ARG=resume\nARG=--yolo\nARG=test-session' "$out"
+has 'Muse native resume puts the command before standing flags' $'ARG=resume\nARG=--yolo\nARG=test-session' "$out"
+for subcommand in exec serve; do
+    out=$(run -x muse "$subcommand" --help)
+    has "Muse $subcommand puts the command before standing flags" "$(printf 'ARG=%s\nARG=--yolo\nARG=--help' "$subcommand")" "$out"
+done
+for subcommand in login logout auth config export trace model-profile skills voice plugins sandbox schema session-message mcp init; do
+    out=$(run -x muse "$subcommand" --help)
+    has "Muse $subcommand preserves explicit arguments" "$(printf 'ARG=%s\nARG=--help' "$subcommand")" "$out"
+    hasnt "Muse $subcommand does not inherit session flags" 'ARG=--yolo' "$out"
+done
+
+# Native Windows Muse installs muse.cmd, which Bash does not find as muse.
+# Simulate that PATH layout with a runnable fixture; the real cmd shim is
+# also exercised manually on Windows with cly muse --version.
+rm "$work/bin/muse"
+case $OSTYPE in
+    msys*|mingw*|cygwin*)
+        cat > "$work/bin/muse.cmd" <<'EOF'
+@echo off
+:args
+if "%~1"=="" exit /b 0
+echo ARG=%~1
+shift
+goto args
+EOF
+        ;;
+    *) cp "$stub" "$work/bin/muse.cmd" ;;
+esac
+printf '%s\n' 'OSTYPE=msys' > "$work/windows-env"
+reset_config
+out=$(printf '\e' | BASH_ENV="$work/windows-env" CLY_ASSUME_TTY=1 "$cly" 2>"$work/err")
+has 'Muse cmd launcher is installed in the menu' 'muse      Muse Code    installed, no profile yet' "$out"
+out=$(BASH_ENV="$work/windows-env" ask $'\n\n' init muse); rc=$?
+eq 'Muse cmd launcher setup needs only flags and directory' 0 "$rc"
+has 'Muse cmd setup stores its stable command name' 'profile.muse.bin=muse' "$(config)"
+out=$(CLY_BIN='' BASH_ENV="$work/windows-env" run -x muse resume 'session with spaces'); rc=$?
+out=${out//$'\r'/}
+eq 'Muse cmd launcher runs by its bare name' 0 "$rc"
+has 'Muse cmd launch preserves the native resume arguments' 'ARG=session with spaces' "$out"
+eq 'Muse cmd launch adds bypass once' 1 "$(printf '%s\n' "$out" | grep -c '^ARG=--yolo$')"
+out=$(CLY_BIN='' BASH_ENV="$work/windows-env" run muse 'a prompt with spaces' --model muse-spark-1.2)
+out=${out//$'\r'/}
+has 'Muse cmd launch preserves prompts and flags' $'ARG=a prompt with spaces\nARG=--model\nARG=muse-spark-1.2' "$out"
+cp "$stub" "$work/bin/muse"
+rm "$work/bin/muse.cmd"
 
 # Defaults are written by init, but explicit existing flags remain authoritative.
 for spec in gemini:--yolo kimi:--auto qwen:--yolo opencode:--auto; do

@@ -44,22 +44,24 @@ Nothing is configured by the install. The first `cly`, `cly init`, or `cly .` as
 
 ## First run
 
+For example, on macOS (installed tools depend on your machine):
+
 ```console
 $ cly
 cly 4.3.0 — which agent?
 
     1  claude    Claude Code  installed, no profile yet
     2  codex     Codex        installed, no profile yet
-    3  antigrav  Antigravity  not installed: https://antigravity.google/docs/cli/install/
+    3  antigrav  Antigravity  not installed: native installer; Enter for command
     4  muse      Muse Code    installed, no profile yet
-    5  kimi      Kimi Code    not installed: npm install -g @moonshot-ai/kimi-code
-    6  qwen      Qwen Code    not installed: npm install -g @qwen-code/qwen-code
-    7  opencode  OpenCode     not installed: npm install -g opencode-ai
-    8  deepseek  DeepSeek     not installed: ollama, from https://ollama.com/download
-    9  meta      Llama        not installed: ollama, from https://ollama.com/download, then: ollama pull llama3.1
+    5  kimi      Kimi Code    not installed: native installer; Enter for command
+    6  qwen      Qwen Code    not installed: native installer; Enter for command
+    7  opencode  OpenCode     not installed: brew install anomalyco/tap/opencode
+    8  deepseek  DeepSeek     not installed: native installer; Enter for command
+    9  meta      Llama        not installed: Ollama + model; Enter for commands
 ```
 
-Move with the arrows and press Enter, or `x` to launch with the agent's prompts skipped; `/` searches the list. Picking a tool that is installed but has no profile asks the setup questions and then launches it; picking one that is not installed prints how to get it and how to sign in. `cly init NAME` asks the same questions on their own:
+Install hints follow the current OS: macOS and Linux use native installers where available, while native Windows hints name PowerShell. Gemini CLI still needs Node.js and npm on Windows and Linux; its macOS hint uses Homebrew. Move with the arrows and press Enter, or `x` to launch with the agent's prompts skipped; `/` searches the list. Picking a tool that is installed but has no profile asks the setup questions and then launches it; picking one that is not installed prints the full install command and how to sign in. `cly init NAME` asks the same questions on their own:
 
 ```console
 $ cly init claude
@@ -139,17 +141,23 @@ Each kind's store, and what cly reads from it:
 | Kind | Index read | Resume words |
 |---|---|---|
 | `claude` | `~/.claude/history.jsonl` — every typed prompt with its session id, directory and time; the name from `/rename` (`custom-title.json` beside the transcript) is the title; a session whose transcript has been cleaned up is not offered | `--resume ID` |
-| `codex` | `~/.codex/history.jsonl` and `session_index.jsonl`; the directory comes from the session's rollout file, and a session without one is not offered | `resume ID` |
+| `codex` | Thread SQLite metadata and rollout headers; native custom names, then `session_index.jsonl` names, then native titles. Confirmed subagents are excluded | `resume ID` |
 | `gemini` | `~/.gemini/tmp/*/chats/session-*.json*`, newest first by name; the directory from the project's `.project_root` or `~/.gemini/projects.json` | `--resume ID` |
-| `muse` | `--yolo` (approvals and sandbox) | `muse login` |
 | `kimi` | `~/.kimi-code/session_index.jsonl`, then each session's `state.json` for title, directory and time | `--session ID` |
-| `qwen`, `opencode` | not listed: a per-directory tree that cannot be mapped back to a directory, and a database. `-x` still knows their flags | — |
+| `muse`, `qwen`, `opencode` | Native metadata adapters with Python; unsupported transcript variants remain visible in capability reports | `resume ID`, `--resume ID`, `--session ID` |
 
-The screen shows `CLY_ROWS` rows at once (default 15) and scrolls. Codex sessions found in prompt history load their directories only when drawn, searched by directory, or picked. Desktop/imported sessions absent from history need their metadata timestamp during discovery; filenames use local time and cannot safely replace it. Metadata is read in small chunks, stopping once the directory and timestamp are available, before the large instruction body. Paths and metadata are cached for the current invocation, with no persistent cache to go stale. `--list-sessions` resolves every directory. Twice `CLY_ROWS` files are opened for the newest Gemini and Kimi sessions; those stores still have a bounded listing. See [the efficiency review](docs/efficiency.md) for measurements and remaining limits.
+The screen shows `CLY_ROWS` rows at once (default 15) and scrolls. With Python 3.9+
+the picker reads metadata from profile-specific stores, preserves native names,
+and excludes Codex subagents. Press `n` to search session names, or start with
+`cly --find "session name"`; `/` searches the whole row. `--list-sessions` keeps
+its five-column machine format. Without Python, the Bash reader supports the
+four original stores; `CLY_SESSION_READER=bash` selects that fallback explicitly.
+See [session tracking](docs/session-tracking.md) for capability reports and limits.
 
 ## Agents
 
-`-x` knows the skip-the-prompts flag of seven kinds, `-r` the session store of four:
+`-x` knows the skip-the-prompts flag of eight kinds. The Python inventory adds
+Muse, compatible Qwen and OpenCode stores to the original four:
 
 | Kind | Skip prompts | Sign in |
 |---|---|---|
@@ -157,11 +165,22 @@ The screen shows `CLY_ROWS` rows at once (default 15) and scrolls. Codex session
 | `codex` | `--dangerously-bypass-approvals-and-sandbox` | `codex login` |
 | `antigrav` (`agy`) | `--dangerously-skip-permissions` | `agy`, then follow the sign-in prompts |
 | `gemini` (legacy) | `--yolo` | `gemini`, then pick "Login with Google" |
+| `muse` | `--yolo` (approvals and sandbox) | `muse login` |
 | `kimi` | `--auto` (Never Ask) | `kimi`, then `/login` |
 | `qwen` | `--yolo` | `qwen`, then `/auth` (a key or a coding plan) |
 | `opencode` | `--auto` | `opencode auth login` |
 
-[Muse Code](https://dev.meta.ai/docs/muse-code) is fourth in the catalog (configured profiles appear first). It supports normal launch and `-x`; use `cly muse resume` for its native session picker. Muse sessions are not yet included in `cly -r`.
+[Muse Code](https://dev.meta.ai/docs/muse-code) is fourth in the catalog (configured profiles appear first). It supports normal launch and `-x`; use `cly muse resume` for its native session picker. Its metadata is included in `cly -r` with Python; current prose capture requires export/import.
+
+Muse runs natively on Windows. Install it from PowerShell with
+`irm https://dev.meta.ai/install.ps1 | iex`, then run `muse login` and
+`cly init muse`. Its installer adds `%LOCALAPPDATA%\Programs\muse` to the
+User PATH; open a new terminal after installing. cly recognizes the official
+`muse.cmd` launcher from both its menu and a profile named `muse`, and an
+explicit Windows path to `muse.cmd` still has kind `muse` for `-x`.
+`cly muse resume`, `cly muse exec ...`, and `cly muse serve` put standing flags
+after the subcommand. Account and utility commands such as `cly muse login`
+receive only the arguments you pass, because session flags do not apply there.
 
 A profile's kind is its executable's name, so `profile.codex.bin=codex` needs nothing more; `profile.NAME.kind=KIND` says otherwise when the executable is not the agent.
 
@@ -244,7 +263,12 @@ A v3 config keeps working unchanged: a bypass flag left in `flags=` still applie
 
 The script uses shell builtins and `mkdir` and nothing else — not even `cat`, whose absence would otherwise break writing the config file — because the shim may hand it a bash whose `PATH` carries none of them. `cygpath` is the one exception, reached through `command -v` and falling back to parameter expansion when it is missing. `test.sh` checks that it stays that way, and the suite itself runs with a `PATH` it owns so it tests cly rather than the machine.
 
-The session lists and the screen are built the same way: each store's index is read whole with `$(<file)` and split in the shell (`mapfile` reads 128 bytes at a time and is 25x slower on these sizes), and nothing in that path forks — a `$(...)` costs 30–80 ms on Windows, and the index has one line per prompt ever typed. The screen is ANSI escapes and `read -n1`; the terminal's size is asked of the terminal itself. It is drawn the way Ink draws Claude Code's own picker — the frame is printed, and each redraw moves the cursor back up over it and prints it again — because through Git's bash a plain conhost window does not honour clear-screen or an alternate screen, and cursor-up does work there.
+The default session inventory uses the optional Python metadata adapters; the
+fallback reads indexes with Bash builtins. The screen uses ANSI escapes and
+`read -n1`, and asks the terminal for its size. Each redraw moves back over the
+previous frame because Git Bash in a plain conhost window does not honor an
+alternate screen. Workflow commands, lifecycle tracking, context handoffs and
+optional collector startup are described in [session tracking](docs/session-tracking.md).
 
 `cly.cmd` prefers Git for Windows' `bin\bash.exe`, which starts with both `/usr/bin` and the Windows `PATH` already on `PATH` and stays in the caller's directory, so no login shell is needed. MSYS2's `usr\bin\bash.exe` is the fallback and does need `-l`. `where bash` is deliberately never consulted: on a machine with WSL it answers `C:\Windows\System32\bash.exe`, a Linux shell that cannot launch a Windows `claude.exe`.
 

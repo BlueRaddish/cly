@@ -5,13 +5,15 @@ tool. The first step keeps active session inventories, resumes native histories,
 and builds one local session-memory library with separate capture, review, filing
 and verified-publication receipts. Chosen models can propose new curated PARA
 notes through a reviewable filing plan. See [workflows](workflows.md) for current
-behavior.
+behavior. Profile-aware discovery, name lookup, scoped lifecycle hooks,
+versioned context handoffs, publication retry receipts and optional startup are
+implemented in the local 4.4.0 build; see [session tracking](session-tracking.md).
 
 ## Next useful improvements
 
-- **Native session lifecycle integration:** provider hooks or supported registries
-  that reveal a process's current conversation ID, including in-client switches.
-  This can reduce manual binding without inferring identities from timing.
+- **Native session lifecycle validation:** verify hook delivery in real Claude
+  and Codex runtimes, including Codex's native trust and shared-server boundary;
+  add supported hooks for other providers as contracts become available.
 - **Broader native readers:** verified current Muse prose, Kimi wire transcripts,
   additional Qwen formats and Antigravity exports. Keep unsupported formats visible
   until fixtures and real-store checks establish their contracts.
@@ -24,8 +26,8 @@ behavior.
   message/content fragments already handle oversized individual sessions.
 - **Native platform validation:** exercise terminal reopen and real agent resume on
   Windows, macOS and Linux; add device-aware history migration only if needed.
-- **Collector startup integration:** optional OS-specific startup/service helpers
-  that preserve single-instance behavior and report failures clearly.
+- **Collector startup validation:** exercise reboot/login recovery on Windows,
+  macOS and Linux using the opt-in startup helpers and structured health output.
 
 ## Optional future GUI — queued idea
 

@@ -43,7 +43,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] || { [ "${BASH_VERSINFO[0]}" = 4 ] && [ "${BA
     exit 2
 fi
 
-CLY_VERSION=4.3.0
+CLY_VERSION=4.4.0
 CLY_SOURCE=${BASH_SOURCE[0]}
 case $CLY_SOURCE in /*|[A-Za-z]:*) ;; *) CLY_SOURCE=$PWD/$CLY_SOURCE ;; esac
 
@@ -65,7 +65,7 @@ CLY_CODEX_FLAGS='--remote-control --dangerously-bypass-approvals-and-sandbox'
 CLY_V2_FLAGS='--remote-control --dangerously-skip-permissions'
 
 # A profile may not take one of these names: the first word means these first.
-CLY_RESERVED='. init config help version snapshot document'
+CLY_RESERVED='. init config help version snapshot document handoff'
 
 # Field separator inside a session row. Never appears in a path or a prompt.
 CLY_US=$'\x1f'
@@ -346,12 +346,34 @@ cly_config_dir() {
     esac
 }
 
-# The last path component, without a .exe. What a profile's kind defaults to.
+# The last path component, without a Windows suffix. A profile's default kind.
 cly_basename() {
     local b=${1##*/}
     b=${b##*\\}
-    b=${b%.exe}
-    printf '%s\n' "${b%.EXE}"
+    case $b in *.[eE][xX][eE]|*.[cC][mM][dD]) b=${b%.*} ;; esac
+    printf '%s\n' "$b"
+}
+
+# Bash finds .exe automatically on Windows, but not .cmd (Muse's official
+# launcher). Keep discovery and execution using the same resolved program.
+cly_executable=''
+cly_find_program() {  # BIN → cly_executable; 1 if missing
+    cly_executable=$1
+    case ${OSTYPE:-} in
+        msys*|mingw*|cygwin*)
+            case $cly_executable in
+                [A-Za-z]:[/\\]*) cly_executable=$(cly_to_posix "$cly_executable") ;;
+            esac ;;
+    esac
+    if command -v "$cly_executable" >/dev/null 2>&1; then
+        return 0
+    fi
+    case ${OSTYPE:-} in
+        msys*|mingw*|cygwin*)
+            cly_executable+=.cmd
+            command -v "$cly_executable" >/dev/null 2>&1 ;;
+        *) return 1 ;;
+    esac
 }
 
 # Whether there is a human on the other end to answer a prompt. CLY_ASSUME_TTY
@@ -404,39 +426,41 @@ cly_kind_info() {  # KIND → the three above; 1 if cly has never heard of it
 # yet prints the two lines that would make it so.
 CLY_CATALOG='claude codex antigrav muse kimi qwen opencode deepseek meta'
 
+# Bash sets OSTYPE even when the Windows .cmd shim supplies a sparse PATH.
+# WSL identifies as Linux, so its instructions run inside WSL.
+case ${OSTYPE:-} in
+    darwin*)                 cly_install_platform=mac ;;
+    msys*|mingw*|cygwin*)   cly_install_platform=windows ;;
+    linux*)                  cly_install_platform=linux ;;
+    *)                       cly_install_platform=other ;;
+esac
+
 cat_label=''
 cat_bin=''
 cat_kind=''
 cat_flags=''
 cat_install=''
+cat_install_menu=''
 cat_login=''
 cly_catalog_info() {  # NAME → the six above; 1 if not in the catalog
-    cat_label='' cat_bin='' cat_kind='' cat_flags='' cat_install='' cat_login=''
+    cat_label='' cat_bin='' cat_kind='' cat_flags='' cat_install='' cat_install_menu='' cat_login=''
     case $1 in
         claude)   cat_label='Claude Code'; cat_bin=claude; cat_flags=$CLY_CLAUDE_FLAGS
-                  cat_install='npm install -g @anthropic-ai/claude-code'
                   cat_login='claude, then /login' ;;
         codex)    cat_label='Codex'; cat_bin=codex; cat_flags=$CLY_CODEX_FLAGS
-                  cat_install='npm install -g @openai/codex'
                   cat_login='codex login' ;;
         antigrav) cat_label='Antigravity'; cat_bin=agy
-                  cat_install='https://antigravity.google/docs/cli/install/'
                   cat_login='agy, then follow the sign-in prompts' ;;
         # Kept for explicitly named legacy profiles, outside the new-agent menu.
         gemini)   cat_label='Gemini CLI'; cat_bin=gemini; cat_flags=--yolo
-                  cat_install='npm install -g @google/gemini-cli'
                   cat_login='gemini, then pick "Login with Google"' ;;
         muse)     cat_label='Muse Code'; cat_bin=muse; cat_flags=--yolo
-                  cat_install='https://dev.meta.ai/docs/muse-code (macOS, Linux, Windows)'
                   cat_login='muse login' ;;
         kimi)     cat_label='Kimi Code'; cat_bin=kimi; cat_flags=--auto
-                  cat_install='npm install -g @moonshot-ai/kimi-code'
                   cat_login='kimi, then /login' ;;
         qwen)     cat_label='Qwen Code'; cat_bin=qwen; cat_flags=--yolo
-                  cat_install='npm install -g @qwen-code/qwen-code'
                   cat_login='qwen, then /auth (a key or a coding plan)' ;;
         opencode) cat_label='OpenCode'; cat_bin=opencode; cat_flags=--auto
-                  cat_install='npm install -g opencode-ai'
                   cat_login='opencode auth login' ;;
         # No terminal agent of its own signs you in with a DeepSeek account.
         # An Ollama account does, and `ollama launch claude` runs Claude Code
@@ -444,17 +468,52 @@ cly_catalog_info() {  # NAME → the six above; 1 if not in the catalog
         # Claude Code's, which is where -x and --resume land.
         deepseek) cat_label='DeepSeek'; cat_bin=ollama; cat_kind=claude
                   cat_flags='launch claude --model deepseek-v4-pro -- --dangerously-skip-permissions'
-                  cat_install='ollama, from https://ollama.com/download'
                   cat_login='ollama signin' ;;
         # This entry runs Llama locally; Muse Code has its own entry above.
         # Pull the weights once, then use the same
         # Claude-Code-through-Ollama route as above.
         meta)     cat_label='Llama'; cat_bin=ollama; cat_kind=claude
                   cat_flags='launch claude --model llama3.1 -- --dangerously-skip-permissions'
-                  cat_install='ollama, from https://ollama.com/download, then: ollama pull llama3.1'
                   cat_login='none — the model runs here' ;;
         *) return 1 ;;
     esac
+    case $cly_install_platform:$1 in
+        mac:claude|linux:claude)       cat_install='curl -fsSL https://claude.ai/install.sh | bash' ;;
+        windows:claude)               cat_install='PowerShell: irm https://claude.ai/install.ps1 | iex' ;;
+        mac:codex|linux:codex)        cat_install='curl -fsSL https://chatgpt.com/codex/install.sh | sh' ;;
+        windows:codex)                cat_install='PowerShell: irm https://chatgpt.com/codex/install.ps1 | iex' ;;
+        mac:antigrav|linux:antigrav)  cat_install='curl -fsSL https://antigravity.google/cli/install.sh | bash' ;;
+        windows:antigrav)             cat_install='PowerShell: irm https://antigravity.google/cli/install.ps1 | iex' ;;
+        mac:gemini)                   cat_install='brew install gemini-cli' ;;
+        linux:gemini|windows:gemini)  cat_install='Node.js 20+, then: npm install -g @google/gemini-cli' ;;
+        mac:muse|linux:muse)          cat_install='curl -fsSL https://dev.meta.ai/install.sh | sh' ;;
+        windows:muse)                 cat_install='PowerShell: irm https://dev.meta.ai/install.ps1 | iex' ;;
+        mac:kimi|linux:kimi)          cat_install='curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash' ;;
+        windows:kimi)                 cat_install='PowerShell: irm https://code.kimi.com/kimi-code/install.ps1 | iex' ;;
+        mac:qwen|linux:qwen)          cat_install='curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash' ;;
+        windows:qwen)                 cat_install='PowerShell: irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1 | iex' ;;
+        mac:opencode)                 cat_install='brew install anomalyco/tap/opencode' ;;
+        linux:opencode)               cat_install='curl -fsSL https://opencode.ai/install | bash' ;;
+        windows:opencode)             cat_install='https://opencode.ai/docs (Windows: Scoop, Chocolatey, or npm)' ;;
+        mac:deepseek|linux:deepseek)  cat_install='curl -fsSL https://ollama.com/install.sh | sh' ;;
+        windows:deepseek)             cat_install='PowerShell: irm https://ollama.com/install.ps1 | iex' ;;
+        mac:meta|linux:meta)          cat_install='curl -fsSL https://ollama.com/install.sh | sh; then: ollama pull llama3.1' ;;
+        windows:meta)                 cat_install='PowerShell: irm https://ollama.com/install.ps1 | iex; then: ollama pull llama3.1' ;;
+        *)                            cat_install='see the official install guide for your platform' ;;
+    esac
+    cat_install_menu=$cat_install
+    # The picker has about 40 columns for the hint at its default width.
+    # Selecting a missing tool prints the full command outside the picker.
+    if [ ${#cat_install_menu} -gt 40 ]; then
+        case $cly_install_platform:$1 in
+            other:*)          cat_install_menu='official guide; Enter for details' ;;
+            *:gemini)         cat_install_menu='npm (Node.js 20+); Enter for command' ;;
+            windows:opencode) cat_install_menu='Scoop/Chocolatey/npm; Enter for guide' ;;
+            *:meta)           cat_install_menu='Ollama + model; Enter for commands' ;;
+            windows:*)        cat_install_menu='PowerShell installer; Enter for command' ;;
+            *)                cat_install_menu='native installer; Enter for command' ;;
+        esac
+    fi
     [ -n "$cat_kind" ] || cat_kind=$1
 }
 
@@ -465,6 +524,7 @@ cly_is_kind() {  # NAME
 
 cly_is_listable() {  # KIND
     case " $CLY_LISTABLE " in *" $1 "*) return 0 ;; esac
+    case $1 in muse|qwen|opencode) [ "${CLY_SESSION_READER:-auto}" != bash ] && cly_python; return $? ;; esac
     return 1
 }
 
@@ -486,6 +546,9 @@ cly_is_listable() {  # KIND
 
 ses_rows=()
 declare -A codex_rollouts=() codex_cwds=() codex_times=()
+declare -A session_profiles=()
+session_profile_filter=''
+session_find=''
 lines=()
 jv=''
 epoch=0
@@ -857,8 +920,29 @@ cly_session_cwd() {  # KIND ID → jv
 }
 
 cly_sessions_all() {  # [KIND]
-    local k
+    local k workflow_python='' script data line rest profile
+    local -a reader_args=()
     ses_rows=()
+    session_profiles=()
+    if [ "${CLY_SESSION_READER:-auto}" != bash ] && cly_python; then
+        script=${CLY_SOURCE%/*}/../lib/cly/session_list.py
+        case ${OSTYPE:-} in msys*|cygwin*) case $script in /?/*) script=${script:1:1}:${script:2} ;; esac ;; esac
+        [ -z "${1:-}" ] || reader_args+=(--kind "$1")
+        [ -z "$session_profile_filter" ] || reader_args+=(--profile "$session_profile_filter")
+        data=$("$workflow_python" "$script" "${reader_args[@]}") || return $?
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            rest=$line
+            for k in 1 2 3 4; do rest=${rest#*"$CLY_US"}; done
+            # The public list keeps its original five-column contract.
+            ses_rows+=("${line%"$CLY_US"*"$CLY_US"*}")
+            rest=${rest#*"$CLY_US"}; profile=${rest%%"$CLY_US"*}
+            cly_row_fields "${ses_rows[${#ses_rows[@]}-1]}"
+            session_profiles[$row_kind:$row_id]=$profile
+            [ "$row_kind" != codex ] || codex_cwds[$row_id]=$row_cwd
+        done <<< "$data"
+        return 0
+    fi
     for k in $CLY_LISTABLE; do
         [ -z "${1:-}" ] || [ "$1" = "$k" ] || continue
         "cly_sessions_$k"
@@ -1018,6 +1102,7 @@ usage: cly [OPTION...] [PROFILE|.] [AGENT-ARG...]
        cly init [NAME] | cly config | cly help | cly version
        cly snapshot [save|list|status|restore DATE|bind|adopt]
        cly document [capture|status|start|stop|catch-up|import|publish]
+       cly handoff [export FILE|import FILE|list]
 
 A profile is a name with an executable, flags and a launch directory of its
 own. The first word is always cly's, and everything after the profile name is
@@ -1042,6 +1127,7 @@ COMMANDS
   snapshot     save active managed sessions; restore by UTC date or ID
   document     collect session prose; review and publish with separate receipts
                snapshot/document need Python 3.9+; use COMMAND --help
+  handoff      transfer selected context with identities, revisions and sources
 
 OPTIONS
   -x, --bypass    skip the agent's permission prompts, with its own flag
@@ -1049,6 +1135,7 @@ OPTIONS
                   one picked; with a PROFILE, only that agent's
   -c, --continue  resume the newest session without asking
       --session KIND:ID  resume one known session, using its profile and directory
+      --find NAME        open the session picker with a name search
       --list-sessions    machine rows: epoch, kind, id, cwd, title (ASCII 31 separated)
   -d, --dir DIR   launch from DIR, this call only
       --here      launch from the current directory, this call only
@@ -1172,11 +1259,11 @@ cly_setup_profile() {  # NAME [WHY]
         ddir=''
     fi
 
-    if [ "$dbin" = "$name" ] && command -v "$name" >/dev/null 2>&1; then
+    if [ "$dbin" = "$name" ] && cly_find_executable "$name"; then
         bin=$name
     else
         echo "  Which executable should '$name' run?"
-        if command -v "$dbin" >/dev/null 2>&1 || [ -x "$dbin" ]; then
+        if cly_find_executable "$dbin"; then
             echo "  Enter a command or a path."
         else
             echo "  Enter a command or a path; there is no '$dbin' on your PATH."
@@ -1188,7 +1275,7 @@ cly_setup_profile() {  # NAME [WHY]
         # accepted here and then fail at every launch. A path with a space in
         # it is fine, which is why this asks whether it resolves rather than
         # whether it has a space.
-        if ! command -v "$bin" >/dev/null 2>&1 && [ ! -x "$bin" ]; then
+        if ! cly_find_executable "$bin"; then
             case $bin in
                 *[[:space:]]*)
                     echo >&2
@@ -1301,20 +1388,8 @@ cly_resolve() {  # NAME
 # Shared by launch and workflow preflight: Bash needs Windows paths converted
 # before command -v and may need an explicit .cmd suffix.
 cly_find_executable() {  # BIN -> workflow_executable
-    workflow_executable=$1
-    case ${OSTYPE:-} in
-        msys*|mingw*|cygwin*)
-            case $workflow_executable in
-                [A-Za-z]:[/\\]*) workflow_executable=$(cly_to_posix "$workflow_executable") ;;
-            esac ;;
-    esac
-    if command -v "$workflow_executable" >/dev/null 2>&1; then return 0; fi
-    case ${OSTYPE:-} in
-        msys*|mingw*|cygwin*)
-            workflow_executable+=.cmd
-            command -v "$workflow_executable" >/dev/null 2>&1 ;;
-        *) return 1 ;;
-    esac
+    cly_find_program "$1" || return $?
+    workflow_executable=$cly_executable
 }
 
 cly_python() {
@@ -1354,7 +1429,7 @@ cly_workflow() {
 # FLAGS is deliberately unquoted where it is used: it is a list of arguments.
 cly_exec() {  # BIN FLAGS ENV BYPASS ARG...
     local bin=$1 flags=$2 env=$3 bypass=$4 kv k v n flag remote=0 kimi_auto=0
-    local remote_resume=0 omitted=0 skip_remote_value=0
+    local remote_resume=0 omitted=0 skip_remote_value=0 muse_command=''
     local -a launch_flags=()
     shift 4
     # shellcheck disable=SC2086
@@ -1375,6 +1450,13 @@ cly_exec() {  # BIN FLAGS ENV BYPASS ARG...
         export "$k=$v"
     done
     if cly_find_executable "$bin"; then bin=$workflow_executable; fi
+    if [ "$res_kind" = muse ] && [ "${CLY_WORKFLOW_QUERY:-0}" != 1 ]; then
+        case ${1:-} in
+            resume|exec|serve) muse_command=$1; shift ;;
+            login|logout|auth|config|export|trace|model-profile|skills|voice|plugins|sandbox|schema|session-message|mcp|init)
+                exec "$bin" "$@" ;;
+        esac
+    fi
     # A remote Codex resume inherits the server session's permissions. Keep
     # cly's own bypass separate from native arguments so only our defaults
     # and -x are suppressed; explicit agent arguments remain untouched.
@@ -1438,14 +1520,10 @@ cly_exec() {  # BIN FLAGS ENV BYPASS ARG...
     if [ "$omitted" = 1 ]; then
         echo "cly: remote Codex resume keeps the session's permissions; bypass applies to new sessions" >&2
     fi
-    local -a final_command=("$bin" "${launch_flags[@]}")
+    local -a final_command=("$bin")
+    [ -z "$muse_command" ] || final_command+=("$muse_command")
+    final_command+=("${launch_flags[@]}")
     [ -z "$bypass" ] || final_command+=("$bypass")
-    if [ "$res_kind" = muse ] && [ "${1:-}" = resume ]; then
-        # Muse's flags belong to the selected subcommand.
-        final_command=("$bin" resume "${launch_flags[@]}")
-        [ -z "$bypass" ] || final_command+=("$bypass")
-        shift
-    fi
     final_command+=("$@")
     if [ "${CLY_TRACK:-auto}" != 0 ] && { [ -z "${CLY_BIN:-}" ] || [ "${CLY_TRACK:-auto}" = 1 ]; } && [ "${CLY_DOCUMENT_JOB:-0}" != 1 ]; then
         local workflow_python=''
@@ -1579,7 +1657,7 @@ cly_unknown_option() {  # ARG...
 cly_no_profile_error() {  # NAME
     echo "cly: no profile named '$1'" >&2
     echo "cly: profiles: ${cfg_profiles:-(none configured)}" >&2
-    if cly_catalog_info "$1" && ! command -v "$cat_bin" >/dev/null 2>&1; then
+    if cly_catalog_info "$1" && ! cly_find_executable "$cat_bin"; then
         echo "cly: $cat_label needs: $cat_install" >&2
         echo "cly: then sign in:    $cat_login" >&2
     fi
@@ -1614,17 +1692,17 @@ cly_menu_build() {  # DEFAULT-NAME
     for n in $CLY_CATALOG; do
         case " $cfg_profiles " in *" $n "*) continue ;; esac
         cly_catalog_info "$n"
-        if command -v "$cat_bin" >/dev/null 2>&1; then
+        if cly_find_executable "$cat_bin"; then
             if [ "$cat_bin" = "$n" ]; then state='installed, no profile yet'
             else state="through $cat_bin, no profile yet"; fi
         else
-            state="not installed: $cat_install"
+            state="not installed: $cat_install_menu"
         fi
         menu_names+=("$n")
         printf -v line '%-9s %-12s %s' "$n" "$cat_label" "$state"
         menu_lines+=("$line")
         cly_tint "$n"; menu_tints+=("$tint")
-        if command -v "$cat_bin" >/dev/null 2>&1; then menu_dims+=(0); else menu_dims+=(1); fi
+        if cly_find_executable "$cat_bin"; then menu_dims+=(0); else menu_dims+=(1); fi
     done
 }
 
@@ -1657,6 +1735,7 @@ scr_live=0       # 1 when the screen is a terminal that can be drawn on
 scr_drawn=0      # lines the last frame took, to move back over
 scr_view=15      # rows shown at once: CLY_ROWS, within the terminal
 scr_sessions=0  # session rows hydrate their directory when first drawn
+scr_name_search=0
 picked_index=-1
 key=''
 
@@ -1702,7 +1781,7 @@ cly_read_key() {
     fi
     cly_trace "read: [$c]"
     case $c in
-        '')  key=enter ;;
+        ''|$'\r')  key=enter ;;
         $'\e')
             key=esc
             IFS= read -rsn1 -t 0.05 r || return 0
@@ -1782,6 +1861,12 @@ cly_screen_filter() {  # QUERY
         return 0
     fi
     for ((i = 0; i < n; i++)); do
+        if [ "$scr_sessions" = 1 ] && [ "$scr_name_search" = 1 ]; then
+            cly_row_fields "${ses_rows[i]}"
+            cly_json_unescape "$row_title"
+            case ${jv,,} in *"$q"*) scr_match+=("$i") ;; esac
+            continue
+        fi
         case ${scr_keys[i],,} in
             "$q"*) scr_match+=("$i"); continue ;;
         esac
@@ -1919,8 +2004,8 @@ cly_screen_leave() {
 # search, letters do nothing — so nothing typed by accident is a command.
 picked_index=-1
 picked_bypass=0
-cly_screen_pick() {  # TITLE HINT HEADER START
-    local title=$1 hint=$2 header=$3 cur=${4:-0} top=0 query='' jump='' mode='' n avail
+cly_screen_pick() {  # TITLE HINT HEADER START [QUERY]
+    local title=$1 hint=$2 header=$3 cur=${4:-0} top=0 query=${5:-} jump='' mode='' n avail
     local note='' hint2 last_top=-1 last_cur=-1 last_n=-1 last_note=''
     local LC_ALL=${LC_ALL:-${LANG:-C.UTF-8}}
     picked_index=-1
@@ -1930,7 +2015,7 @@ cly_screen_pick() {  # TITLE HINT HEADER START
         printf '\e[?25l'
         trap 'cly_screen_leave; exit 130' INT TERM
     fi
-    cly_screen_filter ''
+    cly_screen_filter "$query"
     while :; do
         n=${#scr_match[@]}
         avail=$scr_view
@@ -1941,6 +2026,7 @@ cly_screen_pick() {  # TITLE HINT HEADER START
         [ "$top" -ge 0 ] || top=0
         if [ "$mode" = search ]; then
             note="/$query"; hint2='type to search · Backspace · Enter take the row · Esc back to the list'
+            [ "$scr_name_search" != 1 ] || note="name: $query"
         elif [ -n "$jump" ]; then
             note="row $jump"; hint2=$hint
         else
@@ -1989,7 +2075,12 @@ cly_screen_pick() {  # TITLE HINT HEADER START
             esc)
                 if [ -n "$query" ]; then query=''; cly_screen_filter ''; cur=0; top=0
                 else cly_screen_leave; return 2; fi ;;
-            /)    mode=search; jump='' ;;
+            /)    scr_name_search=0; mode=search; jump=''; cly_screen_filter "$query" ;;
+            n|N)
+                if [ "$scr_sessions" = 1 ]; then
+                    scr_name_search=1; mode=search; query=''; jump=''; cur=0; top=0
+                    cly_screen_filter ''
+                fi ;;
             x|X)
                 [ "$n" -gt 0 ] || continue
                 picked_index=${scr_match[cur]}
@@ -2014,6 +2105,7 @@ cly_menu_pick() {  # DEFAULT-NAME
     local d=$1 i n=${#menu_names[@]} start=0
     cly_screen_open
     scr_sessions=0
+    scr_name_search=0
     scr_lines=("${menu_lines[@]}")
     scr_keys=("${menu_names[@]}")
     scr_tint=("${menu_tints[@]}")
@@ -2042,7 +2134,7 @@ cly_pick_session() {  # [KIND] [NO-ASK]
         [ "$scr_live" = 1 ] && printf 'cly: reading sessions...\r'
     fi
     cly_trace 'sessions: reading'
-    cly_sessions_all "$kind"
+    cly_sessions_all "$kind" || return $?
     n=${#ses_rows[@]}
     cly_trace "sessions: $n read"
     if [ "$n" = 0 ]; then
@@ -2057,6 +2149,8 @@ cly_pick_session() {  # [KIND] [NO-ASK]
         return 0
     fi
     cly_sort_rows
+    scr_name_search=0
+    [ -z "$session_find" ] || scr_name_search=1
     if ! cly_is_interactive; then
         # A printed list has no later draw; keep its bounded directory preview.
         for ((i = 0; i < 2 * cly_rows && i < n; i++)); do
@@ -2067,6 +2161,13 @@ cly_pick_session() {  # [KIND] [NO-ASK]
         done
         echo "cly $CLY_VERSION — which session?${kind:+  ($kind only)}"
         echo
+        if [ -n "$session_find" ]; then
+            cly_session_lines
+            cly_screen_filter "$session_find"
+            local -a matched=()
+            for i in "${scr_match[@]}"; do matched+=("${ses_rows[i]}"); done
+            ses_rows=("${matched[@]}")
+        fi
         cly_print_sessions
         echo
         echo "cly: no terminal to pick at — run this in one, or 'cly NAME' with the agent's own resume flag" >&2
@@ -2074,8 +2175,8 @@ cly_pick_session() {  # [KIND] [NO-ASK]
     fi
     cly_session_lines
     if cly_screen_pick "cly $CLY_VERSION — which session?${kind:+  ($kind only)}" \
-            "up/down move · Enter resume · x resume skipping prompts · / search · Esc quit · $n sessions" \
-            "$scr_header" 0; then
+            "up/down · Enter resume · x bypass · / search · n find name · Esc quit · $n sessions" \
+            "$scr_header" 0 "$session_find"; then
         cly_row_fields "${ses_rows[picked_index]}"
         if [ -z "$row_cwd" ]; then cly_session_cwd "$row_kind" "$row_id"; row_cwd=$jv; fi
         return 0
@@ -2163,6 +2264,9 @@ cly_main() {
             --session)
                 [ $# -ge 2 ] || { cly_usage_error '--session needs KIND:ID'; return 2; }
                 session_key=$2; opt_r=1; shift 2 ;;
+            --find)
+                [ $# -ge 2 ] && [ -n "$2" ] || { cly_usage_error '--find needs a session name'; return 2; }
+                session_find=$2; opt_r=1; shift 2 ;;
             -h|--help)    cly_help; return 0 ;;
             -V|--version) echo "cly $CLY_VERSION"; return 0 ;;
             -*)           cly_unknown_option "$@"; return 2 ;;
@@ -2178,7 +2282,7 @@ cly_main() {
     case $name in
         help)    cly_help; return 0 ;;
         version) echo "cly $CLY_VERSION"; return 0 ;;
-        snapshot|document) cly_workflow "$name" "$@"; return $? ;;
+        snapshot|document|handoff) cly_workflow "$name" "$@"; return $? ;;
         init)
             if [ $# -gt 1 ]; then
                 cly_usage_error "init takes one name, and '$2' would be dropped — flags are asked for, not given here"
@@ -2203,9 +2307,14 @@ cly_main() {
 
     cly_load_profile ''
 
+    if [ -n "$session_find" ] && { [ "$opt_c" = 1 ] || [ -n "$session_key" ] || [ "$list_sessions" = 1 ]; }; then
+        cly_usage_error '--find opens a picker; use it without --continue, --session or --list-sessions'
+        return 2
+    fi
+
     if [ "$list_sessions" = 1 ]; then
         cly_rows_setting
-        cly_sessions_all
+        cly_sessions_all || return $?
         for session_row in "${ses_rows[@]}"; do
             cly_row_fields "$session_row"
             if [ -z "$row_cwd" ]; then cly_session_cwd "$row_kind" "$row_id"; row_cwd=$jv; fi
@@ -2225,7 +2334,7 @@ cly_main() {
         if [ -n "$name" ]; then
             cly_load_profile "$name"
             if [ "$prof_has_section" = 1 ]; then
-                cly_resolve "$name"; filter=$res_kind
+                cly_resolve "$name"; filter=$res_kind; session_profile_filter=$name
             elif cly_is_kind "$name"; then
                 filter=$name
             else
@@ -2247,7 +2356,7 @@ cly_main() {
             if [ -n "$filter" ] && [ "$filter" != "${session_key%%:*}" ]; then
                 echo 'cly: session not found' >&2; return 2
             fi
-            cly_sessions_all "${session_key%%:*}"
+            cly_sessions_all "${session_key%%:*}" || return $?
             for session_row in "${ses_rows[@]}"; do
                 cly_row_fields "$session_row"
                 if [ "$row_kind:$row_id" = "$session_key" ]; then found=1; break; fi
@@ -2262,7 +2371,8 @@ cly_main() {
         # The profile named, if it is one; else the first of the row's kind.
         [ -n "$name" ] && cly_load_profile "$name"
         if [ -z "$name" ] || [ "$prof_has_section" = 0 ]; then
-            name=$(cly_profile_of_kind "$row_kind") || name=''
+            name=${session_profiles[$row_kind:$row_id]:-}
+            [ -n "$name" ] || name=$(cly_profile_of_kind "$row_kind") || name=''
         fi
         if [ -n "$name" ]; then
             cly_load_profile "$name"
@@ -2273,7 +2383,7 @@ cly_main() {
             prof_bin=$row_kind; prof_flags=''; prof_has_flags=1; prof_kind=$row_kind
             prof_env=''; prof_dir=''; prof_has_dir=0
             cly_resolve "$row_kind"
-            if ! command -v "$res_bin" >/dev/null 2>&1; then
+            if ! cly_find_executable "$res_bin"; then
                 echo "cly: that session is $row_kind's, and there is no $row_kind on your PATH" >&2
                 return 2
             fi
@@ -2350,14 +2460,14 @@ cly_main() {
             return 2
         fi
         if cly_catalog_info "$name"; then
-            if ! command -v "$cat_bin" >/dev/null 2>&1; then
+            if ! cly_find_executable "$cat_bin"; then
                 echo "cly: no profile named '$name', and no '$cat_bin' on your PATH" >&2
                 echo "cly: $cat_label needs: $cat_install" >&2
                 echo "cly: then sign in:    $cat_login" >&2
                 echo "cly: after that, 'cly $name' again sets the profile up" >&2
                 return 2
             fi
-        elif ! command -v "$name" >/dev/null 2>&1; then
+        elif ! cly_find_executable "$name"; then
             echo "cly: no profile named '$name', and no '$name' on your PATH" >&2
             echo "cly: profiles: ${cfg_profiles:-(none configured)}" >&2
             echo "cly: run 'cly init $name' to make one anyway" >&2

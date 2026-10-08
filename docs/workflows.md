@@ -53,10 +53,11 @@ cly snapshot bind RUN_ID NATIVE_SESSION_ID
 cly snapshot
 ```
 
-Binding verifies that the native history exists. You are responsible for selecting
-the conversation associated with that run. If you switch conversations inside an
-agent with `/resume`, `/new` or a similar command, bind the current ID again before
-saving. The original launch arguments do not reveal an in-client switch.
+Binding verifies that the native history exists. Managed Claude launches now use
+SessionStart hooks to track conversation switches. Codex can use the exported
+lifecycle hook configuration after native trust review; remote daemons need the
+same run identity. Other runtimes retain explicit binding. See
+[session tracking](session-tracking.md) for setup and supported boundaries.
 
 An unresolved run can be saved as inventory, but restore fails until a new snapshot
 has a binding. `restore --skip-unresolved` explicitly restores only resolvable runs.
@@ -119,9 +120,9 @@ cly document stop
 ```
 
 `document watch` runs the collector in the foreground. `start` runs one background
-collector with a process lock and a local log. It is not installed as an operating
-system startup service; start it again after a reboot. It does not replace an
-existing PARA scheduler. Stop an existing collector before changing its interval
+collector with a process lock and a local log. Optional startup is configured with
+`document startup enable|disable|status`; it is disabled by default. It does not
+replace an existing PARA scheduler. Stop an existing collector before changing its interval
 or selected providers.
 
 Status reports capture errors, provider coverage, pending reviews, pending filing,
@@ -188,9 +189,15 @@ revisions. If a capture changed after generating the plan, generate a new plan.
 
 Each publication requires the writer's remote checksum verification. Partial
 failure retains verified destination receipts but leaves source filing revisions
-pending. Rerunning the same plan rechecks its verified files and attempts remaining
-destinations. Source revisions receive filing receipts only when the entire plan
+pending. Rerunning the same plan rechecks its original staged files and attempts
+destinations not previously attempted. An uncertain prior upload is preserved
+when verification fails; inspect the remote note instead of blindly rewriting it.
+Source revisions receive filing receipts only when the entire plan
 has verified successfully. Sources omitted from the proposal remain pending.
+
+A valid model result with no durable findings produces a successful plan with
+`notes: []` and `outcome: "no-findings"`. Its batch evidence is cached without
+marking sources filed or reviewed. There is no note to apply with `document file`.
 
 This provides explicit model-assisted creation of curated notes. Semantic accuracy
 still needs your review. Reconciliation into existing notes, project hubs and a
@@ -216,7 +223,9 @@ failures remain pending.
 Destinations are
 `2-Areas/memory/sessions/AGENT/YYYY-MM/YYYY-MM-DD-HHMM-AGENT-NATIVE_ID.md`.
 An existing matching note keeps its destination, frontmatter and established
-project links. Multiple matches or malformed frontmatter fail for manual review.
+project links. Its mounted bytes must first match the remote writer's exact
+verification; a stale copy or failed check leaves it pending. Multiple matches or
+malformed frontmatter fail for manual review.
 The raw transcript body is replaced by the latest capture, so this command belongs
 on capture notes rather than manually curated prose notes. A review report is not
 published automatically by this command.
@@ -245,7 +254,9 @@ cly document import session-export.json
 
 Only user/assistant string content is accepted; extra fields are dropped. The
 exporter must remove reasoning, tool output and injected instructions before
-import. An imported conversation joins the same review/publication queue. Import
+import. Agent names must be lowercase portable slugs; case aliases and Windows
+reserved folder names are rejected. An imported conversation joins the same
+review/publication queue. Import
 does not create a native resumable history or an active process binding.
 
 ## Provider coverage
@@ -264,8 +275,9 @@ promise that every installed agent version has been tested.
 | Muse | Native session metadata | Current Muse event prose is not supported; use export/import |
 | Antigravity and other profiles | Inventory can be tracked; native restore preflight is unsupported | Export/import |
 
-Resume IDs supplied explicitly or bound by the user are required for new sessions
-other than ordinary Claude launches. Missing or unreadable history blocks restore.
+Resume IDs come from explicit native arguments, supported lifecycle hooks or
+manual bindings. Unsupported hook integrations require manual binding.
+Missing or unreadable history blocks restore.
 Empty or unrecognized supported-store prose is not evidence of complete capture;
 check the provider counts and errors in `document status`.
 
@@ -288,8 +300,10 @@ the user profile. Nothing is written to the repository.
 
 Readers also honor `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME`,
 `KIMI_CODE_HOME` and `QWEN_HOME`. Snapshot restore queries the selected profile's
-exported environment for its native root. Document capture uses the environment of
-the collector; set the appropriate roots when starting it if your stores differ.
+exported environment for its native root. Document capture and the modern picker
+discover configured profiles and their store overrides, deduplicating shared
+roots. `document sources` reports coverage and unsupported formats. See
+[session tracking](session-tracking.md) for handoffs, startup and structured health.
 
 Snapshots persist native IDs, process identities, profile names, directory/store
 paths and timestamps. They omit command arguments, prompts, credentials and
@@ -297,6 +311,26 @@ environment values. The document library deliberately contains conversation pros
 which can itself contain private information. Keep it and model reports private;
 an explicit model catch-up sends the pending prose to the configured provider.
 Local files use restrictive permissions where the operating system supports them.
+
+## Run the isolated pipeline checks
+
+```sh
+python test-workflows.py
+python test-document-pipeline.py
+```
+
+The first command exercises native format boundaries, model failures and receipt
+logic with fixtures. The second invokes the actual document commands against
+temporary stores and a local writer that copies and verifies bytes. It covers
+Unicode paths, revisions, malformed/torn sources, stale indexes, partial writes,
+changed remote notes and retries. Neither calls live models or Drive.
+
+To include an installed PARA validator without publishing, pass
+`--validator-root PATH_TO_DIRECTORY_CONTAINING_PARALIB` to the second command.
+Validator-normalized content must match the staged bytes for cly's exact receipt
+check; mismatches fail safely. Writer-owned normalization and conditional-create
+support would remove this compatibility limit and the initial concurrent-create
+race. `--results REPORT.json` saves an isolated command/check report locally.
 
 See the [roadmap](roadmap.md) for optional GUI work and remaining portability and
 filing improvements.

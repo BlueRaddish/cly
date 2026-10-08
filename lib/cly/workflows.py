@@ -43,7 +43,7 @@ def private_dir(path):
 def atomic(path, value):
     path = Path(path)
     private_dir(path.parent)
-    temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    temporary = path.with_name("." + uuid.uuid4().hex + ".tmp")
     try:
         with temporary.open("x", encoding="utf-8", newline="\n") as stream:
             os.chmod(temporary, 0o600)
@@ -175,6 +175,8 @@ def catalog(record):
 
 
 def resolve(record):
+    import tracking
+    tracking.apply(record, state())
     items, errors = catalog(record)
     by_id = {item["session_id"]: item for item in items}
     selected = record.get("session_id")
@@ -215,10 +217,12 @@ def supervise(args):
         sid = str(uuid.uuid4())
         command = [command[0], "--session-id", sid, *command[1:]]
     run_id = uuid.uuid4().hex
+    import tracking
+    command, environment, lifecycle = tracking.prepare(kind, command, run_id, state())
     record = {"schema": SCHEMA, "run_id": run_id, "profile": args.profile, "kind": kind,
               "directory": str(Path.cwd()), "bypass": args.bypass == "1", "started": now(),
               "pid": os.getpid(), "birth": birth(os.getpid()), "session_id": sid,
-              "native_root": str(sessions.root(kind)) if kind in sessions.KINDS else ""}
+              "native_root": str(sessions.root(kind)) if kind in sessions.KINDS else "", "tracking": lifecycle}
     items, _ = catalog(record)
     record["baseline"] = [item["session_id"] for item in items]
     path = state() / "runs" / (run_id + ".json")
@@ -230,7 +234,7 @@ def supervise(args):
     previous_termination = {signum: signal.getsignal(signum) for signum in termination_signals}
     try:
         child = subprocess.Popen([bash(), "-c", 'exec "$@"', "cly-agent", *command],
-                                 stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr, **hidden())
+                                 stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr, env=environment, **hidden())
         record.update(child_pid=child.pid, child_birth=birth(child.pid))
         atomic(path, record)
         for signum in termination_signals:
@@ -248,6 +252,8 @@ def supervise(args):
             child.terminate()
             child.wait()
         path.unlink(missing_ok=True)
+        if lifecycle.get("settings"):
+            Path(lifecycle["settings"]).unlink(missing_ok=True)
 
 
 def safe_component(value, label):
@@ -405,7 +411,15 @@ def terminal_commands(plan, terminal):
 
 
 def snapshot_command(args):
-    if args.action == "save":
+    if args.action in {"hooks", "event"}:
+        import tracking
+        value = tracking.hook_config(args.kind) if args.action == "hooks" else tracking.receive(args.kind, run_id=args.run_id)
+        if getattr(args, "output", None):
+            atomic(args.output, value)
+            print(args.output)
+        else:
+            print(json.dumps(value, indent=2, ensure_ascii=False))
+    elif args.action == "save":
         value = save_snapshot()
         print(value["snapshot_id"])
         print(f"{len(value['sessions'])} active sessions saved; " + str(sum(not r.get("session_id") for r in value["sessions"])) + " need native-ID binding")
@@ -429,6 +443,7 @@ def snapshot_command(args):
             record["session_id"] = args.session_id
             record["binding"] = "user"
             atomic(path, record)
+            (state() / "tracking" / (args.run_id + ".json")).unlink(missing_ok=True)
         print("Bound", args.run_id, "to", args.session_id)
     elif args.action == "adopt":
         safe_component(args.profile, "profile")
@@ -460,10 +475,17 @@ def snapshot_command(args):
                 print("Use tmux ls and tmux attach -t cly-... to open the restored workspace.")
 
 
+def validate_agent(value):
+    # Lowercase portable slugs prevent Windows case aliases/reserved folders.
+    if not isinstance(value, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", value) or re.fullmatch(r"con|prn|aux|nul|com[1-9]|lpt[1-9]", value):
+        raise ValueError("Invalid agent: use a lowercase portable slug")
+    return value
+
+
 def validate_session(item):
     if not isinstance(item, dict):
         raise ValueError("Session export must be a JSON object")
-    safe_component(item.get("agent"), "agent")
+    validate_agent(item.get("agent"))
     sid = item.get("session_id")
     if not isinstance(sid, str) or not sessions.ID_RE.fullmatch(sid):
         raise ValueError("Invalid native session ID")
@@ -489,12 +511,26 @@ def note_key(item):
     return item["agent"] + "/" + hashlib.sha256(item["session_id"].encode()).hexdigest()
 
 
+def captured_session(key, record):
+    item = validate_session(read(library() / "sessions" / (key + ".json")))
+    if note_key(item) != key or sessions.revision(item) != record["revision"]:
+        raise ValueError("Captured session/index revision mismatch; recapture before review or filing: " + key)
+    return item
+
+
 def store_session(item, index):
     item = validate_session(item)
     key, rev = note_key(item), sessions.revision(item)
     old = index["sessions"].get(key, {})
     if old.get("revision") == rev:
-        return False
+        # Full-file checks repair crash gaps; a transaction journal could avoid
+        # these extra reads for very large libraries.
+        try:
+            captured_session(key, old)
+            if (library() / "sessions" / (key + ".md")).read_bytes() == sessions.markdown(item).encode():
+                return False
+        except (OSError, ValueError):
+            pass  # Repair files left incomplete by an interrupted capture.
     atomic(library() / "sessions" / (key + ".json"), item)
     atomic(library() / "sessions" / (key + ".md"), sessions.markdown(item))
     index["sessions"][key] = dict(old, revision=rev, agent=item["agent"], session_id=item["session_id"], captured=now())
@@ -502,22 +538,54 @@ def store_session(item, index):
 
 
 def capture(kinds):
+    import profiles
     with lock(library() / "capture.lock"):
         index = read(library() / "index.json", {"schema": SCHEMA, "sessions": {}, "errors": []})
         changed = 0
         provider_errors = index.get("provider_errors", {})
         providers = index.get("providers", {})
+        sources = profiles.discover(kinds)
         for kind in kinds:
-            items, failures = sessions.discover(kind)
-            errors = list(failures)
-            providers[kind] = {"store_exists": sessions.root(kind).exists(), "sessions_found": len(items),
-                               "prose_sessions": sum(bool(item["messages"]) for item in items)}
+            items, errors, profile_status, unique, conflicts = [], [], [], {}, set()
+            stores = {}
+            for source in (entry for entry in sources if entry["kind"] == kind):
+                store = source["store"]
+                normalized = os.path.normcase(str(sessions.native_path(store).resolve()))
+                if normalized not in stores:
+                    stores[normalized] = sessions.discover(kind, store)
+                found, failures = stores[normalized]
+                errors.extend(source["errors"] + list(failures))
+                profile_status.append(dict(source, sessions_found=len(found),
+                                           prose_sessions=sum(bool(item["messages"]) for item in found)))
+                for item in found:
+                    sid = item["session_id"]
+                    if sid in conflicts:
+                        continue
+                    if sid in unique and sessions.revision(unique[sid]) != sessions.revision(item):
+                        errors.append(kind + ": conflicting native session ID across profile stores: " + sid)
+                        conflicts.add(sid)
+                        del unique[sid]
+                    else:
+                        unique[sid] = item
+            items = list(unique.values())
+            providers[kind] = {"store_exists": any(source["store_exists"] for source in profile_status),
+                               "sessions_found": len(items), "prose_sessions": sum(bool(item["messages"]) for item in items),
+                               "capabilities": profiles.capabilities(kind), "profiles": profile_status}
             for item in items:
-                if not item["messages"]:
-                    if kind in {"muse", "kimi", "qwen"}:
-                        errors.append(kind + ": no recognized prose for " + item["session_id"] + "; export/import may be needed")
-                    continue
-                changed += store_session(item, index)
+                try:
+                    key = note_key(validate_session(item))
+                    if item.get("_incomplete") and key in index["sessions"]:
+                        previous = captured_session(key, index["sessions"][key])["messages"]
+                        current = item["messages"]
+                        if len(current) < len(previous) or current[:len(previous)] != previous:
+                            raise ValueError("Incomplete rewritten source; previous capture preserved: " + item["session_id"])
+                    if not item["messages"]:
+                        if kind in {"muse", "kimi", "qwen"}:
+                            errors.append(kind + ": no recognized prose for " + item["session_id"] + "; export/import may be needed")
+                        continue
+                    changed += store_session(item, index)
+                except (OSError, ValueError) as exc:
+                    errors.append(kind + ": " + str(exc))
             provider_errors[kind] = errors
         errors = [error for failures in provider_errors.values() for error in failures]
         index["errors"], index["last_capture"], index["providers"] = errors, now(), providers
@@ -658,6 +726,18 @@ def catch_up(index, profile=None, model=None, filing_plan=False):
         atomic(path, result.stdout)
         return result.stdout
 
+    def no_findings(contents):
+        found = False
+        for content in contents:
+            try:
+                proposal = json.loads(content)
+            except (ValueError, TypeError):
+                return False
+            if not isinstance(proposal, dict) or proposal.get("notes") != []:
+                return False
+            found = True
+        return found
+
     def cached(record, key):
         reference = record.get(receipt_field, {})
         if not isinstance(reference, dict) or reference.get("revision") != record["revision"] or reference.get("scope") != scope:
@@ -667,7 +747,10 @@ def catch_up(index, profile=None, model=None, filing_plan=False):
             if (library() / "reviews/batches").resolve() not in receipt_path.parents:
                 return None
             receipt = read(receipt_path)
-            if not isinstance(receipt, dict) or receipt.get("schema") != SCHEMA or receipt.get("scope") != scope or receipt.get("source_revisions", {}).get(key) != record["revision"]:
+            if not isinstance(receipt, dict) or receipt.get("schema") != SCHEMA or receipt.get("scope") != scope:
+                return None
+            source_revisions = receipt.get("source_revisions")
+            if not isinstance(source_revisions, dict) or source_revisions.get(key) != record["revision"]:
                 return None
             path = (library() / receipt["report"]).resolve()
             if (library() / "reviews/batches").resolve() not in path.parents:
@@ -715,9 +798,13 @@ def catch_up(index, profile=None, model=None, filing_plan=False):
                 atomic(receipt_path, {"schema": SCHEMA, "scope": scope, "source_revisions": source_revisions,
                                       "part": i, "parts": len(fragments), "sha256": hashlib.sha256(content.encode()).hexdigest(), "completed": now()})
             summaries.append({"part": i, "parts": len(fragments), "report": content})
-        prompt = header + "\nReconcile all ordered fragment reports into one compact review of this native session. Preserve source attribution, merge overlapping findings, and explicitly retain uncertainty where text crossed part boundaries.\n" + json.dumps({"agent": item["agent"], "session_id": item["session_id"], "source_revision": record["revision"], "fragment_reports": summaries}, ensure_ascii=False)
         path = report_path(True)
-        content = run_model(prompt, path)
+        if filing_plan and no_findings(summary["report"] for summary in summaries):
+            content = json.dumps({"notes": []})
+            atomic(path, content)
+        else:
+            prompt = header + "\nReconcile all ordered fragment reports into one compact review of this native session. Preserve source attribution, merge overlapping findings, and explicitly retain uncertainty where text crossed part boundaries.\n" + json.dumps({"agent": item["agent"], "session_id": item["session_id"], "source_revision": record["revision"], "fragment_reports": summaries}, ensure_ascii=False)
+            content = run_model(prompt, path)
         if filing_plan:
             content = json.dumps(catch_up_plan(content, source_revisions, index, allow_empty=True), ensure_ascii=False)
             atomic(path, content)
@@ -745,14 +832,14 @@ def catch_up(index, profile=None, model=None, filing_plan=False):
     overhead = header + "\nKeep this batch report compact while retaining actionable findings and source identities.\n"
     size = len(overhead.encode())
     for key, record in todo:
+        # Capture commits session files before its index. Check the actual
+        # normalized source even when cached review evidence is available.
+        item = captured_session(key, record)
         previous = cached(record, key)
         if previous:
             relative, receipt, content = previous
             reports[relative] = (receipt, content)
             continue
-        item = validate_session(read(library() / "sessions" / (key + ".json")))
-        if sessions.revision(item) != record["revision"]:
-            raise ValueError("Library revision mismatch: " + record["agent"] + ":" + record["session_id"])
         payload = "<session-data>\n" + json.dumps(item, ensure_ascii=False) + "\n</session-data>\n"
         length = len(payload.encode())
         if len(overhead.encode()) + length > CATCH_UP_BYTES:
@@ -767,7 +854,12 @@ def catch_up(index, profile=None, model=None, filing_plan=False):
         size += length
     finish_batch()
     report = report_path()
-    if len(reports) == 1 and next(iter(reports.values()))[0]["source_revisions"] == revisions:
+    if filing_plan and no_findings(content for _, content in reports.values()):
+        # Nothing to file is a successful proposal outcome, not a model error.
+        # Keep sources pending: no curated note was published or acknowledged.
+        content = json.dumps({"notes": []})
+        atomic(report, content)
+    elif len(reports) == 1 and next(iter(reports.values()))[0]["source_revisions"] == revisions:
         content = next(iter(reports.values()))[1]
         atomic(report, content)
     else:
@@ -777,7 +869,9 @@ def catch_up(index, profile=None, model=None, filing_plan=False):
         prompt = header + "\nReconcile all batch reports into one cross-agent result. Deduplicate findings and resolve contradictions. Only the current source revisions below are in scope; ignore report claims attributed to other or older revisions. Do not invent findings absent from batch evidence.\n" + json.dumps({"current_sources": current, "batch_reports": evidence}, ensure_ascii=False)
         content = run_model(prompt, report)
     if filing_plan:
-        proposal = catch_up_plan(content, revisions, index)
+        proposal = catch_up_plan(content, revisions, index, allow_empty=True)
+        if not proposal["notes"]:
+            proposal["outcome"] = "no-findings"
         plan_path = report.with_suffix(".json")
         atomic(plan_path, proposal)
         return plan_path, len(todo)
@@ -796,7 +890,7 @@ def validate_filing_plan(plan, index):
     revisions = plan.get("source_revisions")
     if not isinstance(revisions, dict):
         raise ValueError("Filing plan needs source_revisions from the library")
-    paths = set()
+    paths, checked_sources = set(), set()
     for note in plan["notes"]:
         if not isinstance(note, dict):
             raise ValueError("Invalid filing note")
@@ -819,13 +913,16 @@ def validate_filing_plan(plan, index):
             key = note_key(validate_identity(source))
             if key not in index["sessions"] or revisions.get(key) != index["sessions"][key]["revision"]:
                 raise ValueError("Filing source is missing or revised; rerun catch-up")
+            if key not in checked_sources:
+                captured_session(key, index["sessions"][key])
+                checked_sources.add(key)
     return plan
 
 
 def validate_identity(source):
     if not isinstance(source, dict):
         raise ValueError("Invalid source identity")
-    safe_component(source.get("agent"), "agent")
+    validate_agent(source.get("agent"))
     sid = source.get("session_id")
     if not isinstance(sid, str) or not sessions.ID_RE.fullmatch(sid):
         raise ValueError("Invalid source session ID")
@@ -855,16 +952,24 @@ def file_plan(plan_path, index, writer, vault_root):
         for source in sources:
             record = index["sessions"][note_key(source)]
             links.append("[[" + record["vault_path"].removesuffix(".md") + "|Source session]]" if record.get("vault_path") else source["agent"] + ":" + source["session_id"])
-        content = note["content"].rstrip() + "\n\nSources: " + "; ".join(links) + "\n\n[[2-Areas/memory/sessions/README|Session memories]]\n"
         path = library() / "filings" / digest / (str(i) + ".md")
-        atomic(path, content)
-        expected = hashlib.sha256(content.encode()).hexdigest()
         prior = receipt["destinations"].get(destination)
+        if prior:
+            # Source-link metadata may change after raw publication. Retry the
+            # immutable first-attempt artifact, never regenerate different bytes.
+            try:
+                content = path.read_bytes().decode("utf-8")
+            except OSError as exc:
+                raise ValueError("Staged filing content missing; preserve remote note for review") from exc
+        else:
+            content = note["content"].rstrip() + "\n\nSources: " + "; ".join(links) + "\n\n[[2-Areas/memory/sessions/README|Session memories]]\n"
+            atomic(path, content)
+        expected = hashlib.sha256(content.encode()).hexdigest()
         if prior and prior.get("sha256") != expected:
             raise ValueError("Filing receipt does not match staged content")
-        staged.append((destination, path, expected, target))
+        staged.append((destination, path, expected))
     failures = []
-    for destination, path, expected, target in staged:
+    for destination, path, expected in staged:
         command = [bash(), str(writer)]
         try:
             prior = receipt["destinations"].get(destination)
@@ -874,20 +979,20 @@ def file_plan(plan_path, index, writer, vault_root):
                     receipt["destinations"][destination] = {"sha256": expected, "verified": now()}
                     atomic(receipt_path, receipt)
                     continue
-                if prior.get("verified") or target.exists():
-                    failures.append(destination + ": existing remote note changed or verification unavailable; preserved for review")
-                    continue
+                # A stale mount cannot prove remote absence. This writer has no
+                # conditional-create/absence API; never rewrite an uncertain upload.
+                failures.append(destination + ": remote note changed or verification unavailable; preserved for review")
+                continue
             # Remember the intended content even when a writer uploads but
             # reports a checksum/network failure. A retry first rechecks it.
             receipt["destinations"][destination] = {"sha256": expected, "attempted": now()}
             atomic(receipt_path, receipt)
-            if not prior or not target.exists():
-                # The external writer lacks conditional-create/ETag support;
-                # the mounted existence check is an optimistic boundary.
-                first = subprocess.run(command + [str(path), destination], capture_output=True, text=True, **hidden())
-                if first.returncode:
-                    failures.append(destination + ": " + (first.stderr or first.stdout).strip())
-                    continue
+            # The initial mounted existence check is optimistic; a writer with
+            # conditional-create/ETag support can close the concurrent-create race.
+            first = subprocess.run(command + [str(path), destination], capture_output=True, text=True, **hidden())
+            if first.returncode:
+                failures.append(destination + ": " + (first.stderr or first.stdout).strip())
+                continue
             verified = subprocess.run(command + ["--check", destination, str(path)], capture_output=True, text=True, **hidden())
             if verified.returncode:
                 failures.append(destination + ": checksum verification failed")
@@ -907,7 +1012,14 @@ def file_plan(plan_path, index, writer, vault_root):
     return len(staged)
 
 
+def publication_paths(key, revision):
+    import hashlib
+    identity = hashlib.sha256((key + ":" + revision).encode()).hexdigest()
+    return library() / "publish/receipts" / (identity + ".json"), library() / "publish/revisions" / (identity + ".md")
+
+
 def publish(index, writer, vault_root):
+    import hashlib
     root = sessions.native_path(vault_root).resolve()
     writer = sessions.native_path(writer).resolve()
     if not writer.is_file():
@@ -916,7 +1028,52 @@ def publish(index, writer, vault_root):
         raise ValueError("Use the extensionless Bash para-write script, not its .cmd wrapper")
     successes, failures = 0, []
     for key, record in pending(index, "published_revision"):
-        item = read(library() / "sessions" / (key + ".json"))
+        try:
+            item = captured_session(key, record)
+        except (OSError, ValueError) as exc:
+            failures.append(key + ": " + str(exc))
+            continue
+        receipt_path, revision_stage = publication_paths(key, record["revision"])
+        prior = read(receipt_path)
+        if prior:
+            # Uploads may succeed before a network/checksum failure is reported.
+            # Retry the exact staged bytes and verification, never an uncertain rewrite.
+            staged = revision_stage
+            try:
+                expected = hashlib.sha256(staged.read_bytes()).hexdigest()
+                if prior.get("sha256") != expected or prior.get("revision") != record["revision"]:
+                    raise ValueError("Publication receipt/staged checksum mismatch")
+                destination = prior["destination"]
+                agent_tree = "2-Areas/memory/sessions/" + item["agent"] + "/"
+                if not destination.startswith(agent_tree) or ".." in Path(destination).parts or "\\" in destination:
+                    raise ValueError("Invalid publication receipt destination")
+                verified = subprocess.run([bash(), str(writer), "--check", destination, str(staged)], capture_output=True, text=True, **hidden())
+                if verified.returncode:
+                    if prior.get("status") != "retryable":
+                        prior.update(status="pending", last_check=now(), error="Remote verification unavailable or content changed; uncertain upload preserved")
+                        atomic(receipt_path, prior)
+                        failures.append(key + ": " + prior["error"])
+                        continue
+                    prior.update(status="pending", attempted=now())
+                    atomic(receipt_path, prior)
+                    first = subprocess.run([bash(), str(writer), str(staged), destination], capture_output=True, text=True, **hidden())
+                    verified = subprocess.run([bash(), str(writer), "--check", destination, str(staged)], capture_output=True, text=True, **hidden()) if first.returncode == 0 else first
+                    if verified.returncode:
+                        prior.update(status="pending", attempted=now(), error=(verified.stderr or verified.stdout).strip() or "Publication verification failed")
+                        atomic(receipt_path, prior)
+                        failures.append(key + ": " + prior["error"])
+                        continue
+            except (OSError, ValueError, KeyError) as exc:
+                failures.append(key + ": " + str(exc))
+                continue
+            prior.update(status="verified", verified=now())
+            prior.pop("error", None)
+            atomic(receipt_path, prior)
+            index["sessions"][key].update(published_revision=record["revision"], vault_path=destination,
+                                          publication_receipt=str(receipt_path.relative_to(library())).replace("\\", "/"))
+            atomic(library() / "index.json", index)
+            successes += 1
+            continue
         safe_component(item["session_id"], "PARA session ID")
         month = item["started"][:7]
         base = f"2-Areas/memory/sessions/{item['agent']}/{month}"
@@ -931,7 +1088,8 @@ def publish(index, writer, vault_root):
         destination = str(candidates[0].relative_to(root)).replace("\\", "/") if candidates else base + "/" + item["started"][:10] + "-" + item["started"][11:16].replace(":", "") + "-" + item["agent"] + "-" + item["session_id"] + ".md"
         note = sessions.markdown(item)
         if candidates and candidates[0].exists():
-            original = candidates[0].read_text(encoding="utf-8-sig")
+            original_bytes = candidates[0].read_bytes()
+            original = original_bytes.decode("utf-8-sig").replace("\r\n", "\n")
             if not original.startswith("---\n"):
                 failures.append(key + ": existing note lacks frontmatter; preserve it for manual review")
                 continue
@@ -940,6 +1098,18 @@ def publish(index, writer, vault_root):
             # project associations. Only the raw transcript body is recaptured.
             if end < 0:
                 failures.append(key + ": malformed existing frontmatter")
+                continue
+            # A mounted copy can be stale. Verify its exact bytes before using
+            # curated metadata; writer-side ETags would close the check/write race.
+            original_stage = library() / "publish" / (key + ".original.md")
+            atomic(original_stage, original_bytes.decode("utf-8"))
+            try:
+                verified = subprocess.run([bash(), str(writer), "--check", destination, str(original_stage)], capture_output=True, text=True, **hidden())
+            except OSError as exc:
+                failures.append(key + ": " + str(exc))
+                continue
+            if verified.returncode:
+                failures.append(key + ": existing raw note changed or verification unavailable; preserved for review")
                 continue
             note = original[:end + 4] + note[note.find("\n---", 4) + 4:]
             # Existing project links are curated metadata; preserve standalone
@@ -951,17 +1121,31 @@ def publish(index, writer, vault_root):
         note += "\n[[2-Areas/memory/sessions/README|Shared session memories]]\n"
         staged = library() / "publish" / (key + ".md")
         atomic(staged, note)
+        staged = revision_stage
+        atomic(staged, note)
+        receipt = {"schema": SCHEMA, "agent": item["agent"], "session_id": item["session_id"],
+                   "revision": record["revision"], "destination": destination,
+                   "sha256": hashlib.sha256(staged.read_bytes()).hexdigest(), "attempted": now(), "status": "pending"}
+        atomic(receipt_path, receipt)
+        first = None
         try:
             first = subprocess.run([bash(), str(writer), str(staged), destination], capture_output=True, text=True, **hidden())
             verified = subprocess.run([bash(), str(writer), "--check", destination, str(staged)], capture_output=True, text=True, **hidden()) if first.returncode == 0 else first
         except OSError as exc:
+            receipt.update(status="retryable" if first is None else "pending", error=str(exc))
+            atomic(receipt_path, receipt)
             failures.append(key + ": " + str(exc))
             continue
         if first.returncode or verified.returncode:
+            receipt["error"] = (verified.stderr or verified.stdout).strip() or "Publication verification failed"
+            atomic(receipt_path, receipt)
             failures.append(key + ": " + (verified.stderr or verified.stdout).strip())
             continue
+        receipt.update(status="verified", verified=now())
+        atomic(receipt_path, receipt)
         index["sessions"][key]["published_revision"] = record["revision"]
         index["sessions"][key]["vault_path"] = destination
+        index["sessions"][key]["publication_receipt"] = str(receipt_path.relative_to(library())).replace("\\", "/")
         atomic(library() / "index.json", index)
         successes += 1
     return successes, failures
@@ -970,14 +1154,22 @@ def publish(index, writer, vault_root):
 def watcher(args):
     path = state() / "document-watch.json"
     with lock(state() / "document-watch.lock"):
-        atomic(path, {"pid": os.getpid(), "birth": birth(os.getpid()), "started": now()})
+        atomic(path, {"pid": os.getpid(), "birth": birth(os.getpid()), "started": now(), "interval": args.interval})
+        health = read(state() / "document-health.json", {"schema": SCHEMA, "consecutive_errors": 0})
         try:
             while True:
+                health["last_attempt"] = now()
                 try:
                     changed, index = capture(args.agent or sessions.KINDS)
+                    health.update(last_capture=index.get("last_capture"), changed=changed, errors=index.get("errors", []))
+                    health["consecutive_errors"] = health.get("consecutive_errors", 0) + 1 if health["errors"] else 0
+                    if not health["errors"]:
+                        health["last_success"] = now()
                     print(now(), changed, "changed", len(index["errors"]), "errors", flush=True)
                 except (OSError, ValueError) as exc:
+                    health.update(errors=[str(exc)], consecutive_errors=health.get("consecutive_errors", 0) + 1)
                     print(now(), str(exc), file=sys.stderr, flush=True)
+                atomic(state() / "document-health.json", health)
                 time.sleep(args.interval)
         finally:
             path.unlink(missing_ok=True)
@@ -986,6 +1178,172 @@ def watcher(args):
 def collector_status():
     record = read(state() / "document-watch.json")
     return dict(record, active=alive(record)) if record else {"active": False}
+
+
+def startup_registration(command):
+    """Native per-user startup; enable is opt-in and never changes agent config."""
+    import hashlib
+    if any("\n" in argument or "\r" in argument or "\0" in argument for argument in command):
+        raise ValueError("Startup paths cannot contain control characters")
+    name = "cly-capture-" + hashlib.sha256(str(state().resolve()).encode()).hexdigest()[:12]
+    if os.name == "nt":
+        return {"backend": "windows-run", "name": name, "value": subprocess.list2cmdline(command)}
+    if sys.platform == "darwin":
+        import plistlib
+        value = {"Label": name, "ProgramArguments": command, "RunAtLoad": True,
+                 "StandardOutPath": str(state() / "document-watch.log"), "StandardErrorPath": str(state() / "document-watch.log")}
+        return {"backend": "launchagent", "name": name,
+                "path": str(sessions.home() / "Library/LaunchAgents" / (name + ".plist")),
+                "value": plistlib.dumps(value).decode()}
+    if sys.platform.startswith("linux"):
+        # systemd command quoting differs from shell quoting; % must be doubled.
+        quoted = " ".join('"' + item.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"' for item in command)
+        return {"backend": "systemd-user", "name": name + ".service",
+                "path": str(sessions.home() / ".config/systemd/user" / (name + ".service")),
+                "value": "[Unit]\nDescription=cly session capture\n\n[Service]\nType=simple\nExecStart=" + quoted +
+                         "\nRestart=on-failure\nRestartSec=30\n\n[Install]\nWantedBy=default.target\n"}
+    raise ValueError("Automatic startup is unsupported on this platform")
+
+
+def registered_startup(registration):
+    if registration["backend"] == "windows-run":
+        import winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
+                return winreg.QueryValueEx(key, registration["name"])[0] == registration["value"]
+        except FileNotFoundError:
+            return False
+    path = Path(registration["path"])
+    if not path.is_file() or path.read_text(encoding="utf-8") != registration["value"]:
+        return False
+    if registration["backend"] == "systemd-user":
+        result = subprocess.run(["systemctl", "--user", "is-enabled", registration["name"]], capture_output=True, text=True, **hidden())
+        return result.returncode == 0
+    return True
+
+
+def set_startup(registration, enabled):
+    if registration["backend"] == "windows-run":
+        import winreg
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
+            try:
+                current = winreg.QueryValueEx(key, registration["name"])[0]
+            except FileNotFoundError:
+                current = None
+            if current is not None and current != registration["value"]:
+                raise ValueError("Startup registration changed externally; preserved for review")
+            if enabled:
+                winreg.SetValueEx(key, registration["name"], 0, winreg.REG_SZ, registration["value"])
+            elif current is not None:
+                winreg.DeleteValue(key, registration["name"])
+        return
+    path = Path(registration["path"])
+    if path.exists() and path.read_text(encoding="utf-8") != registration["value"]:
+        raise ValueError("Startup registration changed externally; preserved for review")
+    if enabled:
+        atomic(path, registration["value"])
+    if registration["backend"] == "systemd-user":
+        subprocess.run(["systemctl", "--user", "enable" if enabled else "disable", registration["name"]], check=True, capture_output=True, text=True, **hidden())
+    if not enabled:
+        path.unlink(missing_ok=True)
+    if registration["backend"] == "systemd-user":
+        subprocess.run(["systemctl", "--user", "daemon-reload"], check=True, capture_output=True, text=True, **hidden())
+
+
+def startup_status():
+    config = read(state() / "document-startup.json")
+    if not config:
+        return {"enabled": False, "registered": False, "starts": "user login after reboot"}
+    try:
+        registered = registered_startup(config["registration"]) if config.get("enabled") else False
+        return {"enabled": bool(config.get("enabled")), "registered": registered,
+                "backend": config["registration"]["backend"], "starts": "user login after reboot", "configured": config.get("configured"),
+                "status": config.get("status", "verified")}
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+        return {"enabled": bool(config.get("enabled")), "registered": False, "error": str(exc)}
+
+
+def startup_command(args):
+    with lock(state() / "document-manage.lock"):
+        path = state() / "document-startup.json"
+        config = read(path)
+        if args.startup_action == "enable":
+            executable = Path(sys.executable)
+            if os.name == "nt":
+                executable = executable.with_name("pythonw.exe")
+                if not executable.is_file():
+                    raise ValueError("pythonw.exe required for hidden Windows startup capture")
+            controls = ("CLY_CONFIG", "CLY_STATE_HOME", "CLY_LIBRARY_HOME", "CLY_SHELL", "CLAUDE_CONFIG_DIR", "CODEX_HOME",
+                        "GEMINI_CLI_HOME", "KIMI_CODE_HOME", "QWEN_HOME", "CLY_MUSE_HOME", "CLY_OPENCODE_HOME")
+            environment = {name: os.environ[name] for name in controls if name in os.environ}
+            environment.update(CLY_STATE_HOME=str(state()), CLY_LIBRARY_HOME=str(library()))
+            launcher = state() / "document-startup.py"
+            arguments = ["document", "watch", "--interval", str(args.interval)]
+            for agent in args.agent or []:
+                arguments.extend(["--agent", agent])
+            content = "import os, sys\nos.environ.update(" + repr(environment) + ")\nsys.path.insert(0, " + repr(str(Path(__file__).resolve().parent)) + ")\nimport workflows\nlog = open(" + repr(str(state() / "document-watch.log")) + ", 'a', encoding='utf-8', buffering=1)\nos.chmod(" + repr(str(state() / "document-watch.log")) + ", 0o600)\nsys.stdout = sys.stderr = log\nraise SystemExit(workflows.main(" + repr(arguments) + "))\n"
+            registration = startup_registration([str(executable), str(launcher)])
+            if config and config.get("enabled") and config["registration"] != registration:
+                raise ValueError("Disable existing startup registration before changing its command")
+            atomic(launcher, content)
+            # Journal the intended OS registration first so an interrupted enable
+            # remains visible to status and can be retried or disabled safely.
+            config = {"schema": SCHEMA, "enabled": True, "configured": now(), "registration": registration, "status": "pending"}
+            atomic(path, config)
+            set_startup(registration, True)
+            if not registered_startup(registration):
+                raise ValueError("Startup registration verification failed")
+            config["status"] = "verified"
+            atomic(path, config)
+        elif args.startup_action == "disable" and config:
+            set_startup(config["registration"], False)
+            config.update(enabled=False, configured=now(), status="verified")
+            atomic(path, config)
+    print(json.dumps(startup_status(), indent=2, ensure_ascii=False))
+    return 0
+
+
+def document_status(index):
+    import profiles
+    sources = profiles.discover()
+    collector = collector_status()
+    startup = startup_status()
+    errors = list(index.get("errors", []))
+    capture_health = read(state() / "document-health.json", {})
+    if capture_health.get("errors") and capture_health.get("last_attempt", "") >= index.get("last_capture", ""):
+        errors.extend(capture_health["errors"])
+    warnings = [error for source in sources for error in source.get("errors", [])]
+    for source in sources:
+        if source.get("configured") and not source.get("store_exists"):
+            warnings.append(source["profile"] + ": session store missing or unsupported")
+    if startup.get("enabled") and not startup.get("registered"):
+        warnings.append("Configured startup registration is unavailable")
+    elif startup.get("enabled") and startup.get("status") == "pending":
+        warnings.append("Startup registration verification is pending")
+    if not index.get("last_capture"):
+        warnings.append("No completed capture yet")
+    if collector.get("pid") and not collector["active"]:
+        warnings.append("Collector registry points to an exited process")
+    if collector["active"] and capture_health.get("last_attempt"):
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(capture_health["last_attempt"].replace("Z", "+00:00"))).total_seconds()
+        if age > 2 * collector.get("interval", 900) + 30:
+            warnings.append("Collector has not completed a recent cycle")
+    exports = []
+    for key, record in pending(index, "published_revision"):
+        receipt = read(publication_paths(key, record["revision"])[0], {})
+        exports.append({"agent": record["agent"], "session_id": record["session_id"], "revision": record["revision"],
+                        "status": receipt.get("status", "pending"), "attempted": receipt.get("attempted"),
+                        "error": receipt.get("error"), "destination": receipt.get("destination")})
+        if receipt.get("error"):
+            errors.append(record["agent"] + ":" + record["session_id"] + ": " + receipt["error"])
+    return {"schema": SCHEMA, "type": "cly-document-health", "generated": now(),
+            "health": "error" if errors else "warning" if warnings else "ok", "warnings": warnings,
+            "library": str(library()), "sessions": len(index["sessions"]),
+            "pending_review": len(pending(index, "reviewed_revision")), "pending_publish": len(exports),
+            "pending_filing": len(pending(index, "filed_revision")), "pending_exports": exports,
+            "last_capture": index.get("last_capture"), "errors": errors, "providers": index.get("providers", {}),
+            "sources": sources, "collector": collector, "capture_health": capture_health,
+            "startup": startup, "verified_publications": sum(record.get("published_revision") == record["revision"] for record in index["sessions"].values())}
 
 
 def manage_collector(args):
@@ -1029,6 +1387,12 @@ def manage_collector(args):
 
 
 def document_command(args):
+    if args.action == "startup":
+        return startup_command(args)
+    if args.action == "sources":
+        import profiles
+        print(json.dumps(profiles.discover(), indent=2, ensure_ascii=False))
+        return 0
     if args.action == "watch":
         return watcher(args)
     if args.action in {"start", "stop"}:
@@ -1039,11 +1403,7 @@ def document_command(args):
     else:
         index = read(library() / "index.json", {"schema": SCHEMA, "sessions": {}, "errors": []})
     if args.action == "status":
-        print(json.dumps({"library": str(library()), "sessions": len(index["sessions"]),
-                          "pending_review": len(pending(index, "reviewed_revision")), "pending_publish": len(pending(index, "published_revision")),
-                          "pending_filing": len(pending(index, "filed_revision")),
-                          "last_capture": index.get("last_capture"), "errors": index["errors"],
-                          "providers": index.get("providers", {}), "collector": collector_status()}, indent=2, ensure_ascii=False))
+        print(json.dumps(document_status(index), indent=2, ensure_ascii=False))
     elif args.action == "import":
         with lock(library() / "capture.lock"):
             index = read(library() / "index.json", index)
@@ -1082,6 +1442,12 @@ def parser():
     run.add_argument("command", nargs=argparse.REMAINDER)
     snapshot = groups.add_parser("snapshot", help="Save and restore active managed sessions")
     commands = snapshot.add_subparsers(dest="action", required=True)
+    hooks = commands.add_parser("hooks", help="Export native session-hook configuration")
+    hooks.add_argument("--kind", choices=("claude", "codex"), required=True)
+    hooks.add_argument("--output", type=sessions.native_path)
+    event = commands.add_parser("event", help="Receive a native session lifecycle event")
+    event.add_argument("--kind", choices=("claude", "codex"), required=True)
+    event.add_argument("--run-id")
     for action in ("save", "list", "status"):
         commands.add_parser(action)
     restore = commands.add_parser("restore")
@@ -1111,8 +1477,15 @@ def parser():
             command.add_argument("--model")
             command.add_argument("--filing-plan", action="store_true")
             command.add_argument("--batch-bytes", type=int, default=CATCH_UP_BYTES, help="Maximum input bytes per model call (default: 500000)")
-    for action in ("status", "stop"):
+    for action in ("status", "stop", "sources"):
         commands.add_parser(action)
+    startup = commands.add_parser("startup", help="Opt-in per-user capture after reboot and login")
+    startup_commands = startup.add_subparsers(dest="startup_action", required=True)
+    for action in ("enable", "disable", "status"):
+        command = startup_commands.add_parser(action)
+        if action == "enable":
+            command.add_argument("--agent", action="append", choices=sessions.KINDS)
+            command.add_argument("--interval", type=int, default=900)
     imported = commands.add_parser("import")
     imported.add_argument("file", type=sessions.native_path)
     published = commands.add_parser("publish")
@@ -1122,6 +1495,21 @@ def parser():
     filed.add_argument("plan", type=sessions.native_path)
     filed.add_argument("--para-write", required=True)
     filed.add_argument("--vault-root", required=True)
+    handoff = groups.add_parser("handoff", help="Portable selected conversation and project context")
+    handoff_commands = handoff.add_subparsers(dest="action", required=True)
+    exported = handoff_commands.add_parser("export")
+    exported.add_argument("file", type=sessions.native_path)
+    exported.add_argument("--session", action="append", default=[], help="AGENT:SESSION_ID, repeat to select multiple conversations")
+    exported.add_argument("--context", action="append", type=sessions.native_path, default=[], help="Selected UTF-8 project file")
+    exported.add_argument("--project", help="Stable project identity, required for context files")
+    exported.add_argument("--project-root", type=sessions.native_path, default=Path.cwd(), help="Root for portable project-relative context identities")
+    exported.add_argument("--target-agent", help="Destination agent slug; informational")
+    imported = handoff_commands.add_parser("import")
+    imported.add_argument("file", type=sessions.native_path)
+    shown = handoff_commands.add_parser("show", help="Read selected context as Markdown with source revisions")
+    shown.add_argument("file", type=sessions.native_path)
+    shown.add_argument("--output", type=sessions.native_path)
+    handoff_commands.add_parser("list")
     return result
 
 
@@ -1144,6 +1532,9 @@ def main(argv=None):
             return supervise(args)
         if args.group == "snapshot":
             return snapshot_command(args) or 0
+        if args.group == "handoff":
+            import handoffs
+            return handoffs.command(sys.modules[__name__], args)
         return document_command(args) or 0
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
         print("cly:", exc, file=sys.stderr)
