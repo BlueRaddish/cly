@@ -1,6 +1,6 @@
 # cly
 
-One command in front of every coding agent on the machine. A bare `cly` offers a menu of agents; `cly --resume` lists the sessions of all of them, newest first, and reopens the one you pick where it was born; `-x` adds the agent's own skip-the-prompts flag. A **profile** pins an executable, standing flags and a launch directory under a name, so `cly claude` starts [Claude Code](https://claude.ai/code) where its memories live whatever directory you are standing in.
+One command for managing agentic CLI workflows: launch agents, save open sessions, restore a workspace, and collect session memories across clients. A bare `cly` offers a menu of agents; `cly --resume` lists their available sessions, newest first; `-x` adds the agent's own skip-the-prompts flag. A **profile** pins an executable, standing flags and a launch directory under a name.
 
 ```console
 $ cly                # a menu: claude, codex, antigrav, muse, kimi, qwen, opencode, deepseek, meta
@@ -8,7 +8,13 @@ $ cly .              # the default profile — Claude Code, in ~/claude
 $ cly -x codex       # codex, right here, with its approval prompts off
 $ cly -r             # every agent's sessions on one screen; Enter resumes the one in hand
 $ cly -x -c          # the newest session of any agent, resumed, prompts off
+$ cly snapshot       # save active tracked launches
+$ cly snapshot restore latest --dry-run
+$ cly document start # maintain a local session-prose library every 15 minutes
+$ cly document catch-up --profile codex # one model reviews pending memories across agents
 ```
+
+Snapshots and documentation are an optional Python 3.9+ extension, with no third-party Python dependencies. Exact resume IDs and the original native histories are required for restore; new sessions that cannot expose their ID must be bound explicitly. See the [workflow guide](docs/workflows.md) for binding, date-based restore, provider coverage, verified PARA publication and curated filing plans. An optional GUI is recorded in the [roadmap](docs/roadmap.md).
 
 ## Why
 
@@ -234,7 +240,7 @@ A v3 config keeps working unchanged: a bypass flag left in `flags=` still applie
 
 ## One implementation
 
-`bin/cly` is a bash script and is the whole program — bash 4.2 or later, which every Linux, Git for Windows and MSYS2 has; macOS ships 3.2 and needs Homebrew's. bash, MSYS2 and WSL run it directly; PowerShell and cmd reach it through `bin/cly.cmd`, which finds a `bash.exe` and hands the invocation over with the working directory and the arguments intact. There is no second implementation to drift.
+`bin/cly` is the Bash 4.2+ launcher; macOS ships 3.2 and needs Homebrew's Bash. Bash, MSYS2 and WSL run it directly; PowerShell and cmd reach it through `bin/cly.cmd`. The optional `lib/cly` workflow extension uses Python 3.9+ and its standard library. Basic launching and the existing session picker still work without Python; `CLY_TRACK=0` disables managed-launch tracking.
 
 The script uses shell builtins and `mkdir` and nothing else — not even `cat`, whose absence would otherwise break writing the config file — because the shim may hand it a bash whose `PATH` carries none of them. `cygpath` is the one exception, reached through `command -v` and falling back to parameter expansion when it is missing. `test.sh` checks that it stays that way, and the suite itself runs with a `PATH` it owns so it tests cly rather than the machine.
 

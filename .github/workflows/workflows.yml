@@ -1,0 +1,25 @@
+name: Workflow checks
+on: [push, pull_request]
+jobs:
+  workflows:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - name: Install current Bash on macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew install bash
+          echo "CLY_SHELL=$(brew --prefix)/bin/bash" >> "$GITHUB_ENV"
+      - name: Provider fixtures and lifecycle integration
+        run: python test-workflows.py
+      - name: Launcher checks
+        if: runner.os == 'Linux'
+        run: |
+          bash test.sh
+          bash test-performance.sh
