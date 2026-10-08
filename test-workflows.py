@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent
@@ -156,6 +157,7 @@ with tempfile.TemporaryDirectory(prefix="cly-workflows-") as temporary:
         check(count == 6 and packet.is_file() and "untrusted" in packet.read_text())
 
         writer = temp / "writer"
+        (temp / "vault").mkdir()
         writer.write_text('exit 1\n', encoding="utf8")
         successes, failures = w.publish(index, writer, temp / "vault")
         check(successes == 0 and len(failures) == 6 and len(w.pending(index, "published_revision")) == 6)
@@ -441,6 +443,9 @@ def source_boundary_checks(temp):
             path.write_text(json.dumps({"sessionId": "one", "startTime": "2026-10-08T12:00:00Z", "messages": [{"type": "user", "parts_v2": [{"text": "important"}]}]}), encoding="utf-8")
         items, errors = s.discover(kind, root)
         check(not items and any("Unsupported conversation" in e for e in errors))
+        if kind == "gemini":
+            items, errors = s.discover(kind, root, with_messages=False)
+            check(not errors and len(items) == 1 and not items[0]["messages"])
     for content in ({"parts_v2": ["important"]}, [{"type": "future_text", "text": "important"}], [{"type": "text", "text": 3}]):
         root = temp / ("shape-" + str(checks))
         jsonl(root / "projects/hash/one.jsonl", [row(content=content)])
@@ -448,6 +453,15 @@ def source_boundary_checks(temp):
         check(not items and bool(errors))
     check(s.message_prose({"role": "tool", "content": {"unknown": "secret"}}) is None)
     check(s.prose("assistant", [{"type": "thinking", "thinking": "private"}, {"type": "tool_use", "id": "tool"}, {"type": "text", "text": "한글 café 🙂"}]) == {"role": "assistant", "content": "한글 café 🙂"})
+    root = temp / "muse-metadata"
+    jsonl(root / "sessions/2026/10/08/one/session.jsonl", [
+        {"payload_type": "runtime.session.metadata", "payload": {"record": {"workspace_root": "/project"}}},
+        {"record_type": "message", "payload": {"role": "user", "parts_v2": [{"text": "important"}]}},
+    ])
+    items, errors = s.discover("muse", root)
+    check(not items and any("Unsupported conversation" in e for e in errors))
+    items, errors = s.discover("muse", root, with_messages=False)
+    check(not errors and len(items) == 1 and not items[0]["messages"])
 
     # Duplicate copies/prefixes dedup, but conflicting source metadata/prose do not.
     root = temp / "duplicates-valid"
@@ -472,9 +486,34 @@ def source_boundary_checks(temp):
     check(not errors and items[0].get("_incomplete") is True and len(items[0]["messages"]) == 1)
     status = {}
     check(len(list(s.read_records(path, status))) == 1 and status.get("incomplete") is True)
+    complete = jsonl(root / "early-eof.jsonl", [row()])
+    status = {}
+    with patch.object(s.os, "fstat", return_value=SimpleNamespace(st_size=complete.stat().st_size + 100)):
+        check(len(list(s.read_records(complete, status))) == 1 and status.get("incomplete") is True)
     path.write_bytes(path.read_bytes() + b"\nbad\n")
     items, errors = s.discover("claude", root)
     check(not items and any("Malformed JSON" in e for e in errors))
+
+    # Bad numeric source dates must remain per-file errors so another healthy
+    # source in that provider can still be captured. Bad SQLite is one source.
+    for timestamp in (float("inf"), 10 ** 400):
+        root = temp / ("numeric-" + str(checks))
+        jsonl(root / "projects/hash/bad.jsonl", [dict(row("bad"), timestamp=timestamp)])
+        jsonl(root / "projects/hash/healthy.jsonl", [row("healthy")])
+        items, errors = s.discover("claude", root)
+        check({item["session_id"] for item in items} == {"healthy"} and len(errors) == 1)
+    root = temp / "numeric-opencode"
+    root.mkdir()
+    with sqlite3.connect(root / "opencode.db") as db:
+        db.executescript("create table session(id,directory,title,time_created,parent_id);create table message(id,session_id,data,time_created);create table part(id,message_id,data,time_created);")
+        db.execute("insert into session values(?,?,?,?,?)", ("bad", "/project", "Bad", float("inf"), None))
+    db.close()
+    items, errors = s.discover("opencode", root)
+    check(not items and len(errors) == 1)
+    store_file = temp / "store-is-file"
+    store_file.write_text("not a store", encoding="utf-8")
+    items, errors = s.discover("claude", store_file)
+    check(not items and len(errors) == 1 and "store is not a directory" in errors[0])
     return checks
 
 

@@ -929,13 +929,37 @@ def validate_identity(source):
     return source
 
 
+def writer_prepares(writer):
+    result = subprocess.run([bash(), str(writer), "--capabilities"], capture_output=True, text=True, **hidden())
+    return result.returncode == 0 and "prepare-v1" in result.stdout.split()
+
+
+def prepare_note(writer, path, destination):
+    """Let the writer own destination rules; hash and verify its exact bytes."""
+    prepared = path.with_name(path.name + "." + uuid.uuid4().hex + ".prepared")
+    try:
+        result = subprocess.run([bash(), str(writer), "--prepare", str(path), destination, str(prepared)], capture_output=True, text=True, **hidden())
+        if result.returncode:
+            raise ValueError("PARA preparation failed: " + (result.stderr or result.stdout).strip())
+        if not prepared.is_file() or prepared.is_symlink():
+            raise ValueError("PARA preparation did not create a regular output file")
+        prepared.read_bytes().decode("utf-8")
+        os.chmod(prepared, 0o600)
+        os.replace(prepared, path)
+    finally:
+        prepared.unlink(missing_ok=True)
+
+
 def file_plan(plan_path, index, writer, vault_root):
     import hashlib
     plan = validate_filing_plan(read(plan_path), index)
     root = sessions.native_path(vault_root).resolve()
+    if not root.is_dir():
+        raise ValueError("PARA vault root must be an existing directory")
     writer = sessions.native_path(writer).resolve()
     if not writer.is_file() or writer.suffix.lower() in {".cmd", ".bat"}:
         raise ValueError("Use an existing extensionless Bash PARA writer")
+    prepares = writer_prepares(writer)
     digest = hashlib.sha256(json.dumps(plan, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     receipt_path = library() / "filings" / (digest + ".json")
     receipt = read(receipt_path, {"schema": SCHEMA, "destinations": {}})
@@ -958,13 +982,16 @@ def file_plan(plan_path, index, writer, vault_root):
             # Source-link metadata may change after raw publication. Retry the
             # immutable first-attempt artifact, never regenerate different bytes.
             try:
-                content = path.read_bytes().decode("utf-8")
+                content_bytes = path.read_bytes()
             except OSError as exc:
                 raise ValueError("Staged filing content missing; preserve remote note for review") from exc
         else:
             content = note["content"].rstrip() + "\n\nSources: " + "; ".join(links) + "\n\n[[2-Areas/memory/sessions/README|Session memories]]\n"
             atomic(path, content)
-        expected = hashlib.sha256(content.encode()).hexdigest()
+            if prepares:
+                prepare_note(writer, path, destination)
+            content_bytes = path.read_bytes()
+        expected = hashlib.sha256(content_bytes).hexdigest()
         if prior and prior.get("sha256") != expected:
             raise ValueError("Filing receipt does not match staged content")
         staged.append((destination, path, expected))
@@ -1021,11 +1048,14 @@ def publication_paths(key, revision):
 def publish(index, writer, vault_root):
     import hashlib
     root = sessions.native_path(vault_root).resolve()
+    if not root.is_dir():
+        raise ValueError("PARA vault root must be an existing directory")
     writer = sessions.native_path(writer).resolve()
     if not writer.is_file():
         raise ValueError("PARA writer not found")
     if writer.suffix.lower() in {".cmd", ".bat"}:
         raise ValueError("Use the extensionless Bash para-write script, not its .cmd wrapper")
+    prepares = writer_prepares(writer)
     successes, failures = 0, []
     for key, record in pending(index, "published_revision"):
         try:
@@ -1119,10 +1149,15 @@ def publish(index, writer, vault_root):
             if related:
                 note += "\n" + "\n".join(dict.fromkeys(related)) + "\n"
         note += "\n[[2-Areas/memory/sessions/README|Shared session memories]]\n"
-        staged = library() / "publish" / (key + ".md")
-        atomic(staged, note)
         staged = revision_stage
         atomic(staged, note)
+        try:
+            if prepares:
+                prepare_note(writer, staged, destination)
+        except (OSError, ValueError) as exc:
+            failures.append(key + ": " + str(exc))
+            continue
+        atomic(library() / "publish" / (key + ".md"), staged.read_bytes().decode("utf-8"))
         receipt = {"schema": SCHEMA, "agent": item["agent"], "session_id": item["session_id"],
                    "revision": record["revision"], "destination": destination,
                    "sha256": hashlib.sha256(staged.read_bytes()).hexdigest(), "attempted": now(), "status": "pending"}

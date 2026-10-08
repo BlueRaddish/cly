@@ -19,13 +19,12 @@ import sys
 import tempfile
 
 NOTES = Path(__file__).resolve().parent
-DEFAULT_REPO = NOTES if (NOTES / "bin/cly").is_file() else NOTES.parent / "cly-snapshots"
+DEFAULT_REPO = NOTES
 OPTIONS = argparse.ArgumentParser(description=__doc__)
 OPTIONS.add_argument("--repo", type=Path, default=DEFAULT_REPO)
 OPTIONS.add_argument("--bash", default=os.environ.get("CLY_SHELL") or (str(Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe") if os.name == "nt" else shutil.which("bash")))
 OPTIONS.add_argument("--validator-root", type=Path, help="Optional directory containing installed paralib.py; real rules stay outside cly")
 OPTIONS.add_argument("--results", type=Path, help="Optional JSON command/check report")
-OPTIONS.add_argument("--allow-known-bugs", action="store_true", help="Record regressions without stopping, for a baseline before fixes")
 ARGS = OPTIONS.parse_args()
 REPO = ARGS.repo.resolve()
 BASH = Path(ARGS.bash)
@@ -43,6 +42,31 @@ root = pathlib.Path(os.environ["TEST_REMOTE"])
 control_path = pathlib.Path(os.environ["TEST_CONTROL"])
 control = json.loads(control_path.read_text(encoding="utf-8"))
 args = sys.argv[1:]
+if args[0] == "--capabilities":
+    with open(os.environ["TEST_CAP_LOG"], "a", encoding="utf-8") as stream:
+        stream.write("capability probe\n")
+    if not control.get("legacy") and (rules or control.get("advertise_prepare")):
+        print("prepare-v1")
+        sys.exit(0)
+    sys.exit(2)
+if args[0] == "--prepare":
+    source, destination, output = pathlib.Path(args[1]), args[2], pathlib.Path(args[3])
+    with open(os.environ["TEST_LOG"], "a", encoding="utf-8") as stream:
+        stream.write(json.dumps({"check": False, "prepare": True, "destination": destination}, ensure_ascii=False) + "\n")
+    if control.get("prepare_fail") == destination:
+        print("injected preparation error", file=sys.stderr)
+        sys.exit(11)
+    content = source.read_text(encoding="utf-8")
+    if rules and paralib.is_note(destination):
+        errors, fixes, content = paralib.validate(destination, content)
+        if errors:
+            print("validator: " + "; ".join(errors), file=sys.stderr)
+            sys.exit(1)
+    if control.get("prepare_raw_marker") and destination.startswith("2-Areas/memory/sessions/"):
+        content += "\nPrepared raw publication marker.\n"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(content.encode("utf-8"))
+    sys.exit(0)
 checking = args[0] == "--check"
 destination, source = (args[1], pathlib.Path(args[2])) if checking else (args[1], pathlib.Path(args[0]))
 target = root / destination
@@ -83,13 +107,6 @@ print("wrote and locally verified: " + destination)
 def check(value, name):
     assert value, name
     CHECKS.append(name)
-
-
-def regression(value, name):
-    if not value and ARGS.allow_known_bugs:
-        ISSUES.append({"kind": "regression reproduced", "description": name})
-        return
-    check(value, name)
 
 
 def write_json(path, value):
@@ -144,7 +161,8 @@ def run():
                    CLY_OPENCODE_HOME=str(temp / "OpenCode absent"),
                    MSYS_NO_PATHCONV="1", MSYS2_ARG_CONV_EXCL="*",
                    TEST_VAULT=str(temp / "local vault"), TEST_REMOTE=str(temp / "local remote"),
-                   TEST_CONTROL=str(temp / "writer control.json"), TEST_LOG=str(temp / "writer log.jsonl"))
+                   TEST_CONTROL=str(temp / "writer control.json"), TEST_LOG=str(temp / "writer log.jsonl"),
+                   TEST_CAP_LOG=str(temp / "writer capability log.txt"))
         if ARGS.validator_root:
             env["TEST_RULES"] = str(ARGS.validator_root.resolve())
         else:
@@ -217,6 +235,24 @@ def run():
         plan_path = temp / "reviewed plan.json"
         plan = make_plan(env, "0-Inbox/Unicode café 한글.md")
         write_json(plan_path, plan)
+        # An unavailable mount must not be treated as an empty vault. Reject
+        # before probing or invoking the writer and preserve every receipt.
+        missing_root = temp / "missing vault"
+        file_root = temp / "vault is a file"
+        file_root.write_text("not a vault", encoding="utf-8")
+        for invalid_root in (missing_root, file_root):
+            for action in ("file", "publish"):
+                before_index = (Path(env["CLY_LIBRARY_HOME"]) / "index.json").read_bytes()
+                before_receipts = {str(path): path.read_bytes() for path in (Path(env["CLY_LIBRARY_HOME"]) / "filings").glob("*.json")}
+                before_calls = {name: Path(env[name]).read_bytes() if Path(env[name]).exists() else b""
+                                for name in ("TEST_LOG", "TEST_CAP_LOG")}
+                arguments = [action, plan_path] if action == "file" else [action]
+                command(env, *arguments, "--para-write", writer, "--vault-root", invalid_root, expected=1)
+                check(before_calls == {name: Path(env[name]).read_bytes() if Path(env[name]).exists() else b""
+                                       for name in before_calls}, "invalid vault root invokes no writer or capability call: " + action)
+                check(before_index == (Path(env["CLY_LIBRARY_HOME"]) / "index.json").read_bytes()
+                      and before_receipts == {str(path): path.read_bytes() for path in (Path(env["CLY_LIBRARY_HOME"]) / "filings").glob("*.json")},
+                      "invalid vault root preserves filing/publication receipts: " + action)
         command(env, "file", plan_path, *filing)
         target = vault / plan["notes"][0]["path"]
         check(target.is_file() and "Sources:" in target.read_text(encoding="utf-8"), "curated filing creates validated Unicode destination with source citations")
@@ -261,11 +297,20 @@ def run():
         command(env, "file", plan_path, *filing, expected=1)
         check((vault / "0-Inbox/partial-one.md").exists() and (vault / "0-Inbox/partial-two.md").exists(), "partial upload failure simulates note reaching destination")
         check(any(record.get("filed_revision") != record["revision"] for record in index(env)["sessions"].values()), "partial failure leaves source revisions pending")
+        digest = hashlib.sha256(json.dumps(partial, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        stage_folder = Path(env["CLY_LIBRARY_HOME"]) / "filings" / digest
+        saved_stages = {path.name: path.read_bytes() for path in stage_folder.glob("*.md")}
+        receipt_path = stage_folder.with_suffix(".json")
+        prior_hashes = {path: record["sha256"] for path, record in json.loads(receipt_path.read_text(encoding="utf-8"))["destinations"].items()}
+        command(env, "publish", *filing)
+        check(all(record.get("vault_path") for record in index(env)["sessions"].values()), "legitimate raw publication adds source links after interrupted curated filing")
         log_before = len(Path(env["TEST_LOG"]).read_text(encoding="utf-8").splitlines())
         write_json(control, {})
         command(env, "file", plan_path, *filing)
         events = [json.loads(line) for line in Path(env["TEST_LOG"]).read_text(encoding="utf-8").splitlines()[log_before:]]
         check(all(event["check"] for event in events), "retry verifies already uploaded partial notes without overwriting")
+        check(saved_stages == {path.name: path.read_bytes() for path in stage_folder.glob("*.md")}, "same-plan retry preserves staged bytes despite newly published source links")
+        check(prior_hashes == {path: record["sha256"] for path, record in json.loads(receipt_path.read_text(encoding="utf-8"))["destinations"].items()}, "same-plan retry preserves content hashes after source vault_path changes")
 
         outage = make_plan(env, "0-Inbox/verification-outage.md")
         write_json(plan_path, outage)
@@ -294,41 +339,87 @@ def run():
         remote_recovery.write_bytes(staged.read_bytes())
         command(env, "file", plan_path, *filing)
 
-        # This real validator normalizes type from path, like para-write. cly's
-        # second verification compares the uncorrected staged source exactly.
+        # Advertised preparation must fail closed before upload; legacy writers
+        # continue using their original staged artifact without the protocol.
+        preparation = make_plan(env, "0-Inbox/preparation-error.md")
+        write_json(plan_path, preparation)
+        write_json(control, {"advertise_prepare": True, "prepare_fail": "0-Inbox/preparation-error.md"})
+        logs = Path(env["TEST_LOG"]).read_bytes()
+        command(env, "file", plan_path, *filing, expected=1)
+        events = [json.loads(line) for line in Path(env["TEST_LOG"]).read_bytes()[len(logs):].decode("utf-8").splitlines()]
+        check(events and all(event.get("prepare") for event in events), "advertised preparation failure makes no upload or verification call")
+        check(not (Path(env["TEST_REMOTE"]) / "0-Inbox/preparation-error.md").exists(), "preparation failure creates no remote note")
+        write_json(control, {"legacy": True})
+        legacy = make_plan(env, "0-Inbox/legacy-writer.md")
+        write_json(plan_path, legacy)
+        command(env, "file", plan_path, *filing)
+        check((vault / "0-Inbox/legacy-writer.md").exists(), "writer without preparation capability remains supported")
+        write_json(control, {})
+
+        # Real validator normalization happens before artifact hashing/staging;
+        # the corrected staged artifact is the exact upload and receipt source.
         with codex.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "content": "Type-correction pending revision fixture."}}) + "\n")
         command(env, "capture", "--agent", "codex")
         if ARGS.validator_root:
             wrong_type = make_plan(env, "0-Inbox/type-correction.md", note(note_type="area"))
             write_json(plan_path, wrong_type)
-            result = command(env, "file", plan_path, *filing, expected=1)
+            result = command(env, "file", plan_path, *filing)
             check("type: inbox" in (vault / "0-Inbox/type-correction.md").read_text(encoding="utf-8"), "real validator corrects uploaded type")
-            check("checksum verification failed" in result.stderr, "corrected validator upload fails cly exact-source check")
-            check(any(record.get("filed_revision") != record["revision"] for record in index(env)["sessions"].values()), "type-corrected unverified filing remains pending")
-            ISSUES.append({"kind": "known limitation", "description": "Writer-derived frontmatter type changes cause cly's second original-source check to fail; uploaded corrected file is preserved for review, sources remain pending.", "command": "document file reviewed-plan.json --para-write WRITER --vault-root VAULT", "input": "0-Inbox/type-correction.md with type: area"})
+            check(all(record.get("filed_revision") == record["revision"] for record in index(env)["sessions"].values()), "prepared corrected filing advances verified receipts")
+            digest = hashlib.sha256(json.dumps(wrong_type, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+            staged = Path(env["CLY_LIBRARY_HOME"]) / "filings" / digest / "0.md"
+            remote = Path(env["TEST_REMOTE"]) / "0-Inbox/type-correction.md"
+            check(staged.read_bytes() == remote.read_bytes(), "corrected prepared staging exactly matches remote bytes")
+            receipt = json.loads((Path(env["CLY_LIBRARY_HOME"]) / "filings" / (digest + ".json")).read_text(encoding="utf-8"))
+            check(receipt["destinations"]["0-Inbox/type-correction.md"]["sha256"] == hashlib.sha256(staged.read_bytes()).hexdigest(), "receipt hashes corrected prepared artifact")
 
+        write_json(control, {"advertise_prepare": True, "prepare_raw_marker": True})
         command(env, "publish", *filing)
+        write_json(control, {})
         current = index(env)
         check(all(record.get("published_revision") == record["revision"] for record in current["sessions"].values()), "raw publication advances only verified revisions")
         codex_key, codex_record = next((key, record) for key, record in current["sessions"].items() if record["agent"] == "codex")
         raw_target = vault / codex_record["vault_path"]
+        publication_receipt = Path(env["CLY_LIBRARY_HOME"]) / codex_record["publication_receipt"]
+        receipt = json.loads(publication_receipt.read_text(encoding="utf-8"))
+        artifact = Path(env["CLY_LIBRARY_HOME"]) / "publish/revisions" / (publication_receipt.stem + ".md")
         raw_remote = Path(env["TEST_REMOTE"]) / codex_record["vault_path"]
+        legacy_stage = Path(env["CLY_LIBRARY_HOME"]) / "publish" / (codex_key + ".md")
+        check(b"Prepared raw publication marker." in artifact.read_bytes(), "raw publisher uses prepared revision bytes")
+        check(receipt["sha256"] == hashlib.sha256(artifact.read_bytes()).hexdigest(), "raw publication receipt hashes prepared artifact")
+        check(artifact.read_bytes() == raw_remote.read_bytes() == legacy_stage.read_bytes(), "prepared raw revision, remote and legacy stage bytes match")
+        check(receipt["status"] == "verified" and receipt["revision"] == codex_record["revision"], "prepared raw receipt records verified current revision")
         original = raw_target.read_text(encoding="utf-8")
         original = original.replace("---\n\n#", "project: cly\nmetadata:\n  nested: preserved\n---\n\n#", 1)
         original += "\n- [[1-Projects/cly/README|cly project]]\n"
         raw_target.write_text(original, encoding="utf-8", newline="\n")
-        raw_remote.write_bytes(raw_target.read_bytes())
+        remote_raw = Path(env["TEST_REMOTE"]) / codex_record["vault_path"]
+        remote_raw.write_bytes(raw_target.read_bytes())
         with codex.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "content": "Another new captured message."}}) + "\n")
         command(env, "capture", "--agent", "codex")
         command(env, "publish", *filing)
+        # Remote association changed while the mounted copy still carries the
+        # previous association. Refuse recapture before any upload.
+        stale_mounted = raw_target.read_bytes()
+        remote_raw.write_bytes(stale_mounted.replace(b"project: cly", b"project: current-remote"))
+        with codex.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "content": "Stale mounted metadata fixture."}}) + "\n")
+        command(env, "capture", "--agent", "codex")
+        logs = Path(env["TEST_LOG"]).read_bytes()
+        command(env, "publish", *filing, expected=1)
+        events = [json.loads(line) for line in Path(env["TEST_LOG"]).read_bytes()[len(logs):].decode("utf-8").splitlines()]
+        check(events and all(event["check"] for event in events), "stale mounted raw metadata is refused before any upload")
+        check(b"project: current-remote" in remote_raw.read_bytes(), "raw publication preserves newer remote association")
+        raw_target.write_bytes(remote_raw.read_bytes())
+        command(env, "publish", *filing)
         published = raw_target.read_text(encoding="utf-8")
-        check("project: cly\nmetadata:\n  nested: preserved" in published and "[[1-Projects/cly/README|cly project]]" in published, "raw recapture preserves complete frontmatter and curated project links")
+        check("project: current-remote\nmetadata:\n  nested: preserved" in published and "[[1-Projects/cly/README|cly project]]" in published, "raw recapture preserves complete frontmatter and curated project links")
         check("Another new captured message." in published, "raw recapture updates transcript body")
         # A malformed existing raw note must also survive a revised capture.
         raw_target.write_text("Existing prose without frontmatter must survive.\n", encoding="utf-8")
-        raw_remote.write_bytes(raw_target.read_bytes())
+        remote_raw.write_bytes(raw_target.read_bytes())
         with codex.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps({"type": "response_item", "payload": {"type": "message", "role": "assistant", "channel": "final", "content": "Malformed existing raw note fixture."}}) + "\n")
         command(env, "capture", "--agent", "codex")
@@ -336,7 +427,7 @@ def run():
         check(raw_target.read_text(encoding="utf-8") == "Existing prose without frontmatter must survive.\n", "raw publication preserves malformed existing note for manual review")
         check(index(env)["sessions"][codex_key]["published_revision"] != index(env)["sessions"][codex_key]["revision"], "failed raw publication keeps current revision pending")
         raw_target.write_text(published, encoding="utf-8", newline="\n")
-        raw_remote.write_bytes(raw_target.read_bytes())
+        remote_raw.write_bytes(raw_target.read_bytes())
         command(env, "publish", *filing)
         bad_export = temp / "bad-export.json"
         write_json(bad_export, {"agent": "codex", "session_id": "../../bad", "started": "2026-10-08", "directory": "", "title": "bad", "messages": []})
@@ -361,7 +452,7 @@ def run():
         check(not (vault / "0-Inbox/uncertain-remote.md").exists(), "uncertain upload test mount remains missing")
         write_json(control, {"mirror_mount": False})
         result = command(env, "file", plan_path, *filing, expected=None)
-        regression(result.returncode != 0 and remote.read_text(encoding="utf-8") == "Human changed the remote note.\n",
+        check(result.returncode != 0 and remote.read_text(encoding="utf-8") == "Human changed the remote note.\n",
                    "uncertain upload retry must preserve changed remote note even when mounted target is missing")
         write_json(control, {})
 
@@ -373,13 +464,16 @@ def run():
         prefix = b"\n".join(full.splitlines()[:2]) + b'\n{"unfinished":'
         codex.write_bytes(prefix)
         command(env, "capture", "--agent", "codex", expected=None)
-        regression(codex_json.read_bytes() == saved, "torn shortened native source must retain last full normalized conversation")
+        check(codex_json.read_bytes() == saved, "torn shortened native source must retain last full normalized conversation")
+        codex.write_bytes(full.splitlines()[0] + b'\n{"unfinished":')
+        result = command(env, "capture", "--agent", "codex", expected=1)
+        check(codex_json.read_bytes() == saved, "torn rewrite with zero prose retains prior full normalized conversation")
         codex.write_bytes(full)
         command(env, "capture", "--agent", "codex")
         with codex.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps({"type": "response_item", "payload": {"type": "message", "role": "assistant", "channel": "private_unknown_channel", "content": "PRIVATE_UNRECOGNIZED_CHANNEL"}}) + "\n")
         command(env, "capture", "--agent", "codex")
-        regression("PRIVATE_UNRECOGNIZED_CHANNEL" not in codex_json.read_text(encoding="utf-8"), "unrecognized private Codex channel must not enter prose library")
+        check("PRIVATE_UNRECOGNIZED_CHANNEL" not in codex_json.read_text(encoding="utf-8"), "unrecognized private Codex channel must not enter prose library")
 
         # Windows treats case-only folders as aliases. Accept either canonical
         # agent identity or a rejected import; never two index entries pointing
@@ -392,7 +486,7 @@ def run():
         result = command(env, "import", bad_export, expected=None)
         records = [record for record in index(env)["sessions"].values()
                    if record["agent"].casefold() == "codex" and record["session_id"] == alias["session_id"]]
-        regression(len(records) == 1 and (result.returncode == 0 or codex_json.read_bytes() == before),
+        check(len(records) == 1 and (result.returncode == 0 or codex_json.read_bytes() == before),
                    "case-only agent import must canonicalize or reject without duplicated Windows aliases")
         # Restore native source before testing corruption of an otherwise current
         # normalized record. The source revision in the index must remain proof
@@ -405,7 +499,7 @@ def run():
         write_json(plan_path, stale)
         logs = Path(env["TEST_LOG"]).read_bytes()
         result = command(env, "file", plan_path, *filing, expected=None)
-        regression(result.returncode != 0 and not (vault / "0-Inbox/normalized-index-mismatch.md").exists()
+        check(result.returncode != 0 and not (vault / "0-Inbox/normalized-index-mismatch.md").exists()
                    and Path(env["TEST_LOG"]).read_bytes() == logs,
                    "normalized JSON/index revision mismatch must reject filing before any writer call")
 

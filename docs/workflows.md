@@ -327,10 +327,16 @@ changed remote notes and retries. Neither calls live models or Drive.
 
 To include an installed PARA validator without publishing, pass
 `--validator-root PATH_TO_DIRECTORY_CONTAINING_PARALIB` to the second command.
-Validator-normalized content must match the staged bytes for cly's exact receipt
-check; mismatches fail safely. Writer-owned normalization and conditional-create
-support would remove this compatibility limit and the initial concurrent-create
-race. `--results REPORT.json` saves an isolated command/check report locally.
+`--results REPORT.json` saves an isolated command/check report locally.
+
+cly probes `WRITER --capabilities` for `prepare-v1`. Supporting writers accept
+`WRITER --prepare SOURCE VAULT_PATH OUTPUT`, producing destination-correct bytes
+locally without uploading or changing SOURCE. cly stages those exact bytes before
+hashing, uploading and checking them. Preparation failure prevents upload; retries
+reuse the first staged artifact. The installed PARA writer supports this from
+version 1.2.0. Older writers remain supported, but must upload the staged bytes
+unchanged to pass exact verification. Writer-side conditional creation/version
+checks remain needed to close the initial existence-check/write race.
 
 See the [roadmap](roadmap.md) for optional GUI work and remaining portability and
 filing improvements.

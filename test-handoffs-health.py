@@ -146,8 +146,11 @@ with tempfile.TemporaryDirectory(prefix="cly-handoff-") as directory:
         writer.write_text("unused", encoding="utf-8")
         calls = []
         def uncertain(command, **kwargs):
+            if "--capabilities" in command:
+                return subprocess.CompletedProcess(command, 1, "", "unsupported")
             calls.append(command)
             return subprocess.CompletedProcess(command, 1, "", "offline")
+        (temp / "vault").mkdir()
         with patch.object(w, "bash", return_value="bash"), patch.object(w.subprocess, "run", side_effect=uncertain):
             check(w.publish(index, writer, temp / "vault")[0] == 0)
             count = len(calls)
@@ -157,11 +160,14 @@ with tempfile.TemporaryDirectory(prefix="cly-handoff-") as directory:
                 check(w.document_status(index)["health"] == "error")
         check(index["sessions"][w.note_key(item)].get("published_revision") != sessions.revision(updated))
         calls.clear()
-        with patch.object(w, "bash", return_value="bash"), patch.object(w.subprocess, "run", side_effect=lambda command, **kwargs: (calls.append(command) or subprocess.CompletedProcess(command, 0, "verified", ""))):
+        def verified_writer(command, **kwargs):
+            if "--capabilities" not in command:
+                calls.append(command)
+            return subprocess.CompletedProcess(command, 0, "verified", "")
+        with patch.object(w, "bash", return_value="bash"), patch.object(w.subprocess, "run", side_effect=verified_writer):
             check(w.publish(index, writer, temp / "vault")[0] == 1)
             check(len(calls) == 1 and "--check" in calls[0])
         publication = w.read(w.publication_paths(w.note_key(item), sessions.revision(updated))[0])
         check(publication["status"] == "verified" and publication["sha256"] and publication["verified"])
 
 print(checks, "handoff/health checks passed")
-

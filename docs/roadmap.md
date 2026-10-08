@@ -21,6 +21,9 @@ implemented in the local 4.4.0 build; see [session tracking](session-tracking.md
   merges into existing project/resource/memory notes and hubs. Preserve established
   metadata and edits; keep raw capture, proposed edits and completed filing receipts
   distinct.
+- **Conditional writer updates:** support conditional create or version checks
+  to close the remaining existence-check/write races. Destination-correct byte
+  preparation already uses the writer's optional `prepare-v1` capability.
 - **Hierarchical final reconciliation:** combine exceptionally large collections of
   batch summaries without exceeding the chosen model's input budget. Existing
   message/content fragments already handle oversized individual sessions.

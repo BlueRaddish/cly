@@ -67,6 +67,8 @@ def read_records(path, status=None):
         while remaining:
             line = stream.readline(remaining)
             if not line:
+                if status is not None:
+                    status["incomplete"] = True
                 break
             remaining -= len(line)
             number += 1
@@ -479,10 +481,12 @@ def discover(kind, store=None, with_messages=True):
     result, errors = [], []
     if not store.exists():
         return result, errors
+    if not store.is_dir():
+        return result, [f"{kind}: native store is not a directory: {store}"]
     if kind == "opencode":
         try:
             return opencode_sessions(store, with_messages), errors
-        except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, AttributeError) as exc:
+        except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, AttributeError, OverflowError) as exc:
             return [], [f"opencode: {exc}"]
     patterns = {"claude": ["projects/*/*.jsonl"], "codex": ["sessions/*/*/*/rollout-*.jsonl", "archived_sessions/rollout-*.jsonl"],
                 "gemini": ["tmp/*/chats/session-*.json"], "kimi": ["sessions/*/*/state.json"],
@@ -545,7 +549,7 @@ def discover(kind, store=None, with_messages=True):
                 if not with_messages:
                     item["messages"] = []
                 result.append(item)
-        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError) as exc:
             errors.append(f"{kind}: {path}: {exc}")
     for item in result:
         if "_updated" not in item:
