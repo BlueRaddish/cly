@@ -393,7 +393,7 @@ def run():
         original = raw_target.read_text(encoding="utf-8")
         original = original.replace("---\n\n#", "project: cly\nmetadata:\n  nested: preserved\n---\n\n#", 1)
         original += "\n- [[1-Projects/cly/README|cly project]]\n"
-        raw_target.write_text(original, encoding="utf-8", newline="\n")
+        raw_target.write_bytes(original.encode("utf-8"))
         remote_raw = Path(env["TEST_REMOTE"]) / codex_record["vault_path"]
         remote_raw.write_bytes(raw_target.read_bytes())
         with codex.open("a", encoding="utf-8") as stream:
@@ -426,7 +426,7 @@ def run():
         command(env, "publish", *filing, expected=1)
         check(raw_target.read_text(encoding="utf-8") == "Existing prose without frontmatter must survive.\n", "raw publication preserves malformed existing note for manual review")
         check(index(env)["sessions"][codex_key]["published_revision"] != index(env)["sessions"][codex_key]["revision"], "failed raw publication keeps current revision pending")
-        raw_target.write_text(published, encoding="utf-8", newline="\n")
+        raw_target.write_bytes(published.encode("utf-8"))
         remote_raw.write_bytes(raw_target.read_bytes())
         command(env, "publish", *filing)
         bad_export = temp / "bad-export.json"
