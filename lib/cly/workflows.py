@@ -18,6 +18,7 @@ import time
 import uuid
 
 import processes
+import resume_options
 import sessions
 
 SCRIPT = Path(__file__).resolve().parents[2] / "bin/cly"
@@ -173,6 +174,8 @@ def resolve(record):
     by_id = {item["session_id"]: item for item in items}
     selected = record.get("session_id")
     record["history_present"] = bool(selected and selected in by_id)
+    if record["history_present"]:
+        resume_options.native(record, by_id[selected]["source"])
     if not selected:
         candidates = [item["session_id"] for item in items
                       if item["session_id"] not in record.get("baseline", [])
@@ -202,6 +205,7 @@ def supervise(args):
     if not command:
         raise ValueError("Missing agent command")
     kind = args.kind
+    options = resume_options.capture(kind, command[1:])
     sid = native_id(kind, command[1:])
     # Claude exposes an exact new-session ID flag. Do not override continuation,
     # forks, headless jobs or explicit session selection.
@@ -212,13 +216,13 @@ def supervise(args):
     import tracking
     command, environment, lifecycle = tracking.prepare(kind, command, run_id, state())
     record = {"schema": SCHEMA, "run_id": run_id, "profile": args.profile, "kind": kind,
-              "directory": str(Path.cwd()), "bypass": args.bypass == "1", "started": now(),
+              "directory": str(Path.cwd()), "bypass": resume_options.bypass(kind, options), "resume_options": options, "started": now(),
               "pid": os.getpid(), "birth": birth(os.getpid()), "session_id": sid,
               "native_root": str(sessions.root(kind)) if kind in sessions.KINDS else "", "tracking": lifecycle}
     items, _ = catalog(record)
     record["baseline"] = [item["session_id"] for item in items]
     path = state() / "runs" / (run_id + ".json")
-    # No argv, environment values or prompts enter the persisted registry.
+    # Only validated resume options persist; raw argv, env and prompts do not.
     atomic(path, record)
     child = None
     previous = signal.getsignal(signal.SIGINT)
@@ -316,6 +320,7 @@ def restored_directory(record, mappings, different_host):
 
 def restore_plan(snapshot, mappings=(), skip_unresolved=False, query=True):
     plan, failures = [], []
+    warned = set()
     for record in snapshot["sessions"]:
         if not isinstance(record, dict) or not isinstance(record.get("directory"), str) or not isinstance(record.get("bypass"), bool):
             raise ValueError("Invalid snapshot session record")
@@ -332,7 +337,21 @@ def restore_plan(snapshot, mappings=(), skip_unresolved=False, query=True):
         if not Path(directory).is_dir():
             failures.append(profile + ": missing directory " + directory)
             continue
-        arguments = ["--dir", directory] + (["-x"] if record.get("bypass") else []) + [profile, sessions.RESUME[kind], sid]
+        options = record.get("resume_options")
+        if options is not None:
+            resume_options.validate(kind, options)
+            if options.get("omitted_flags"):
+                failures.append(profile + ": unsupported launch options were not saved: " + ", ".join(options["omitted_flags"]))
+                continue
+            if options.get("origin") == "legacy" and profile not in warned:
+                print("cly: original launch flags are unavailable for " + profile + "; replaying recovered native settings", file=sys.stderr)
+                warned.add(profile)
+            arguments = ["--cly-snapshot-resume", "--dir", directory, profile, sessions.RESUME[kind], sid, *options["args"]]
+        else:
+            if profile not in warned:
+                print("cly: legacy snapshot has no saved launch options for " + profile + "; using its current profile", file=sys.stderr)
+                warned.add(profile)
+            arguments = ["--dir", directory] + (["-x"] if record.get("bypass") else []) + [profile, sessions.RESUME[kind], sid]
         if query:
             env = dict(os.environ, CLY_WORKFLOW_QUERY="1", CLY_TRACK="0")
             result = subprocess.run(cly_command(arguments), env=env, capture_output=True, text=True, **hidden())
@@ -353,7 +372,10 @@ def restore_plan(snapshot, mappings=(), skip_unresolved=False, query=True):
         else:
             failures.append(profile + ": native history validation is not supported for " + kind)
             continue
-        plan.append({"profile": profile, "kind": kind, "session_id": sid, "directory": directory, "argv": cly_command(arguments)})
+        item = {"profile": profile, "kind": kind, "session_id": sid, "directory": directory, "argv": cly_command(arguments)}
+        if options is not None:
+            item["resume_options"] = options
+        plan.append(item)
     if failures:
         raise ValueError("Restore preflight failed; nothing opened:\n" + "\n".join(failures))
     if not plan:
@@ -537,10 +559,15 @@ def snapshot_command(args):
         record = {"schema": SCHEMA, "run_id": sid, "pid": args.pid, "birth": token, "profile": args.profile,
                   "kind": args.kind, "session_id": args.session_id, "binding": "user", "started": now(),
                   "directory": str(sessions.native_path(args.directory).resolve()), "bypass": False,
+                  "resume_options": resume_options.capture(args.kind, ([resume_options.BYPASS[args.kind]] if args.bypass else []) + args.resume_arg),
                   "native_root": str(sessions.root(args.kind))}
+        record["resume_options"]["origin"] = "adoption"
         items, errors = catalog(record)
         if args.session_id not in {v["session_id"] for v in items}:
             raise ValueError("Native session history not found/readable")
+        selected = next(v for v in items if v["session_id"] == args.session_id)
+        resume_options.native(record, selected["source"])
+        record["bypass"] = resume_options.bypass(args.kind, record["resume_options"])
         atomic(state() / "runs" / (sid + ".json"), record)
         print(sid)
     elif args.action == "restore":
@@ -1585,6 +1612,8 @@ def parser():
     adopt.add_argument("--kind", choices=sessions.KINDS, required=True)
     adopt.add_argument("--session-id", required=True)
     adopt.add_argument("--directory", required=True)
+    adopt.add_argument("--bypass", action="store_true", help="Record explicitly requested full-access/YOLO mode")
+    adopt.add_argument("--resume-arg", action="append", default=[], help="Known resume option or value; use --resume-arg=--model --resume-arg=NAME")
     document = groups.add_parser("document", help="Collect and review a shared session-memory library")
     commands = document.add_subparsers(dest="action", required=True)
     for action in ("capture", "catch-up", "watch", "start"):

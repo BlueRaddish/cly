@@ -42,6 +42,29 @@ scrollback, shell state and running tools are outside the snapshot. Native histo
 must remain available in the agent's own store; the JSON snapshot is not a backup
 of that history.
 
+New snapshots save validated resume options from the actual agent command,
+including standing flags, explicit bypass, model, search, sandbox/approval options
+and writable directories. Restore replays those options without layering later
+profile flags or `CLY_FLAGS` over them. Profile executable and environment are
+still resolved on this computer; credentials and prompts are never saved.
+
+Codex snapshots refresh permissions from the exact bound session's recorded
+`turn_context`, including network and writable-root changes. A pre-launch context
+does not override an explicitly requested launch policy. An idle `/permissions`
+change has to reach native history before cly can observe it. Two clients bound to
+one native ID share that history; cly cannot distinguish their unrecorded settings.
+Codex restores locally: old remote connection addresses/auth environment names
+are transport settings and are not replayed against a shared server whose existing
+session might have different permissions.
+
+Only known resume options and a small set of non-secret Codex config overrides
+are saved. Unsupported flag names appear in `resume_options.omitted_flags`; their
+values are excluded and restore refuses that record instead of silently dropping
+the options. Add support for that option or adopt again with supported resume
+settings. Legacy snapshots without `resume_options` remain readable and warn that
+their restore uses the current profile. Lost original flags cannot be recovered
+from legacy JSON alone.
+
 ### Reload from a snapshot
 
 Reload stops **all currently tracked active agent process families**, then opens
@@ -118,11 +141,18 @@ Processes opened before installing this feature can be registered explicitly:
 ```sh
 cly snapshot adopt 12345 --profile codex --kind codex \
   --session-id NATIVE_SESSION_ID --directory /home/you/project
+cly snapshot adopt 12345 --profile codex --kind codex \
+  --session-id NATIVE_SESSION_ID --directory /home/you/project --bypass \
+  --resume-arg=--model --resume-arg=MODEL
 ```
 
 Supply the PID and native ID of the same active agent. Adoption checks process
 liveness and history, not their association. It does not discover arbitrary
 terminal windows or migrate an older terminal-layout snapshot.
+Codex adoption reads the exact session's latest recorded permissions when no
+explicit policy is supplied. `--bypass` or `--resume-arg` permission settings take
+precedence over earlier history. Other agents' adoption needs explicit resume
+settings to preserve launch choices; unknown permissions are labeled `unknown`.
 
 ### Terminals and another computer
 
@@ -375,6 +405,7 @@ Local files use restrictive permissions where the operating system supports them
 ```sh
 python test-workflows.py
 python test-snapshot-reload.py
+python test-snapshot-options.py
 python test-windows-batch.py
 python test-snapshot-console.py
 python test-document-pipeline.py

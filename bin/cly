@@ -43,7 +43,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] || { [ "${BASH_VERSINFO[0]}" = 4 ] && [ "${BA
     exit 2
 fi
 
-CLY_VERSION=4.4.2
+CLY_VERSION=4.4.3
 CLY_SOURCE=${BASH_SOURCE[0]}
 case $CLY_SOURCE in /*|[A-Za-z]:*) ;; *) CLY_SOURCE=$PWD/$CLY_SOURCE ;; esac
 
@@ -2615,6 +2615,12 @@ cly_main() {
     cly_exec "$res_bin" "$res_flags" "$res_env" "$bypass" ${agent[@]+"${agent[@]}"}
 }
 
+if [ "${1:-}" = --cly-snapshot-resume ]; then
+    # Saved native arguments already contain the standing resume options.
+    # Reuse the normal empty override so later profile/env flags stay out.
+    export CLY_FLAGS=''
+    shift
+fi
 if [ "${1:-}" = --cly-exec-agent ]; then
     shift
     [ "$#" -gt 0 ] || { echo 'cly: missing supervised agent program' >&2; exit 2; }
