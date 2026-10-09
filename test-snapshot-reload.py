@@ -297,6 +297,10 @@ with tempfile.TemporaryDirectory(prefix="cly-reload-") as directory:
             check(not windows_stop.called and not unix_stop.called)
         table[61004] = p.ProcessIdentity(61004, "", 61001)
         fails(lambda: p.plan([root_record]), "Cannot verify")
+        with patch.object(p.os, "getpid", return_value=61001), patch.object(p.os, "getppid", return_value=62001):
+            with patch.object(p, "_family", wraps=p._family) as family:
+                fails(lambda: p.plan([root_record]), "own process")
+                check(not family.called)
 
     # Real verification uses only two newly created hidden fixture families.
     # Their start identities remain checked at stop time; no agent PID is used.

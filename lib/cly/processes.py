@@ -215,8 +215,12 @@ def plan(records):
             if item and birth_matches(item.birth, token) and birth_matches(birth(pid), token):
                 run_ids = tuple(sorted(set(roots.get(pid, item).run_ids + (str(record.get("run_id", "")),))))
                 roots[pid] = replace(item, run_ids=run_ids)
+    protected = _protected(table)
+    # Refuse our own roots before transient enumeration children are inspected.
+    if roots.keys() & protected:
+        raise ValueError("Reload would stop its own process or an ancestor; run it from a separate terminal")
     selected = _family(roots, table)
-    if selected.keys() & _protected(table):
+    if selected.keys() & protected:
         raise ValueError("Reload would stop its own process or an ancestor; run it from a separate terminal")
     return tuple(selected[pid] for pid in sorted(selected))
 
