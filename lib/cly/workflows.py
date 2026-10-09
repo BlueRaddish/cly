@@ -254,7 +254,7 @@ def safe_component(value, label):
     return value
 
 
-def save_snapshot(records=None):
+def snapshot_value(records=None):
     records = [dict(record) for record in (active() if records is None else records)]
     if not records:
         raise ValueError("No active tracked sessions. Launch through cly, or use snapshot adopt for an existing process.")
@@ -267,7 +267,19 @@ def save_snapshot(records=None):
         except ValueError:
             record["home_relative"] = None
     value = {"schema": SCHEMA, "snapshot_id": sid, "created": now(), "host": socket.gethostname(), "sessions": records}
-    atomic(state() / "snapshots" / (sid + ".json"), value)
+    return value
+
+
+def save_snapshot(records=None):
+    value = snapshot_value(records)
+    atomic(state() / "snapshots" / (value["snapshot_id"] + ".json"), value)
+    return value
+
+
+def validate_snapshot(value):
+    if not isinstance(value, dict) or value.get("schema") != SCHEMA or not isinstance(value.get("sessions"), list):
+        raise ValueError("Invalid snapshot")
+    safe_component(value.get("snapshot_id"), "snapshot ID")
     return value
 
 
@@ -275,14 +287,18 @@ def snapshots():
     result = []
     for path in sorted((state() / "snapshots").glob("*.json")):
         value = read(path)
-        if not isinstance(value, dict) or value.get("schema") != SCHEMA or not isinstance(value.get("sessions"), list):
-            raise ValueError("Invalid snapshot: " + str(path))
-        safe_component(value.get("snapshot_id"), "snapshot ID")
+        try:
+            validate_snapshot(value)
+        except ValueError as exc:
+            raise ValueError(str(exc) + ": " + str(path)) from exc
         result.append(value)
     return result
 
 
 def select_snapshot(selector):
+    if selector == "auto":
+        import snapshot_auto
+        return snapshot_auto.latest(sys.modules[__name__])
     values = snapshots()
     if selector == "latest":
         matches = values
@@ -353,7 +369,9 @@ def restore_plan(snapshot, mappings=(), skip_unresolved=False, query=True):
         else:
             failures.append(profile + ": native history validation is not supported for " + kind)
             continue
-        plan.append({"profile": profile, "kind": kind, "session_id": sid, "directory": directory, "argv": cly_command(arguments)})
+        plan.append({"profile": profile, "kind": kind, "session_id": sid, "directory": directory,
+                     "native_root": str(sessions.native_path(store).resolve()) if store else str(sessions.root(kind).resolve()),
+                     "argv": cly_command(arguments)})
     if failures:
         raise ValueError("Restore preflight failed; nothing opened:\n" + "\n".join(failures))
     if not plan:
@@ -400,6 +418,22 @@ def terminal_commands(plan, terminal):
         else:
             raise ValueError("Unknown terminal adapter " + terminal)
     return commands
+
+
+def launch_terminal(command):
+    if command[0] in {"x-terminal-emulator", "konsole"}:
+        # These adapters may stay alive for the lifetime of the pane. A spawn
+        # receipt is not readiness; automatic capture waits for tracked agents.
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, **hidden())
+        try:
+            code = process.wait(timeout=0.25)
+        except subprocess.TimeoutExpired:
+            return
+        if code:
+            raise subprocess.CalledProcessError(code, command)
+        return
+    subprocess.run(command, check=True, capture_output=True, timeout=30, **hidden())
 
 
 def reload_scope(records):
@@ -460,6 +494,8 @@ def reload_snapshot(args):
         if recovery:
             print("Recovery snapshot:", recovery["snapshot_id"])
         print("Reload receipt:", path)
+        import snapshot_auto
+        snapshot_auto.hold_restore(sys.modules[__name__], plan)
         phase = "stop"
         try:
             receipt["status"] = "stopping"
@@ -471,7 +507,7 @@ def reload_snapshot(args):
             receipt["status"] = "opening"
             atomic(path, receipt)
             for index, command in enumerate(commands):
-                subprocess.run(command, check=True, **hidden())
+                launch_terminal(command)
                 receipt["opened"].append(index)
                 atomic(path, receipt)
         except (OSError, ValueError, subprocess.SubprocessError, KeyboardInterrupt) as exc:
@@ -490,6 +526,9 @@ def reload_snapshot(args):
 
 
 def snapshot_command(args):
+    if args.action == "auto":
+        import snapshot_auto
+        return snapshot_auto.command(sys.modules[__name__], args)
     if args.action == "reload":
         return reload_snapshot(args)
     if args.action in {"hooks", "event"}:
@@ -544,16 +583,19 @@ def snapshot_command(args):
         atomic(state() / "runs" / (sid + ".json"), record)
         print(sid)
     elif args.action == "restore":
-        value = select_snapshot(args.selector)
-        plan = restore_plan(value, args.map_dir, args.skip_unresolved)
-        commands = terminal_commands(plan, args.terminal)
-        print("Snapshot:", value["snapshot_id"])
-        print(json.dumps(plan, indent=2, ensure_ascii=False))
-        if not args.dry_run:
-            for command in commands:
-                subprocess.run(command, check=True, **hidden())
-            if args.terminal == "tmux":
-                print("Use tmux ls and tmux attach -t cly-... to open the restored workspace.")
+        with nullcontext() if args.dry_run else lock(state() / "reload.lock"):
+            value = select_snapshot(args.selector)
+            plan = restore_plan(value, args.map_dir, args.skip_unresolved)
+            commands = terminal_commands(plan, args.terminal)
+            print("Snapshot:", value["snapshot_id"])
+            print(json.dumps(plan, indent=2, ensure_ascii=False))
+            if not args.dry_run:
+                import snapshot_auto
+                snapshot_auto.hold_restore(sys.modules[__name__], plan)
+                for command in commands:
+                    launch_terminal(command)
+                if args.terminal == "tmux":
+                    print("Use tmux ls and tmux attach -t cly-... to open the restored workspace.")
 
 
 def validate_agent(value):
@@ -1296,12 +1338,14 @@ def collector_status():
     return dict(record, active=alive(record)) if record else {"active": False}
 
 
-def startup_registration(command):
+def startup_registration(command, purpose="capture"):
     """Native per-user startup; enable is opt-in and never changes agent config."""
     import hashlib
     if any("\n" in argument or "\r" in argument or "\0" in argument for argument in command):
         raise ValueError("Startup paths cannot contain control characters")
-    name = "cly-capture-" + hashlib.sha256(str(state().resolve()).encode()).hexdigest()[:12]
+    if purpose not in {"capture", "snapshot"}:
+        raise ValueError("Unknown startup purpose")
+    name = "cly-" + purpose + "-" + hashlib.sha256(str(state().resolve()).encode()).hexdigest()[:12]
     if os.name == "nt":
         return {"backend": "windows-run", "name": name, "value": subprocess.list2cmdline(command)}
     if sys.platform == "darwin":
@@ -1312,11 +1356,14 @@ def startup_registration(command):
                 "path": str(sessions.home() / "Library/LaunchAgents" / (name + ".plist")),
                 "value": plistlib.dumps(value).decode()}
     if sys.platform.startswith("linux"):
-        # systemd command quoting differs from shell quoting; % must be doubled.
-        quoted = " ".join('"' + item.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"' for item in command)
+        # systemd expands % and $ inside quotes; double both for literal data.
+        quoted = " ".join('"' + item.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$") + '"' for item in command)
         return {"backend": "systemd-user", "name": name + ".service",
                 "path": str(sessions.home() / ".config/systemd/user" / (name + ".service")),
-                "value": "[Unit]\nDescription=cly session capture\n\n[Service]\nType=simple\nExecStart=" + quoted +
+                "value": "[Unit]\nDescription=cly session " + purpose + "\n\n[Service]\nType=simple\nExecStart=" + quoted +
+                         # Restored terminals survive watcher teardown. Their
+                         # lifecycle belongs to cly run tracking/manual reload.
+                         ("\nKillMode=process" if purpose == "snapshot" else "") +
                          "\nRestart=on-failure\nRestartSec=30\n\n[Install]\nWantedBy=default.target\n"}
     raise ValueError("Automatic startup is unsupported on this platform")
 
@@ -1558,6 +1605,8 @@ def parser():
     run.add_argument("command", nargs=argparse.REMAINDER)
     snapshot = groups.add_parser("snapshot", help="Save and restore active managed sessions")
     commands = snapshot.add_subparsers(dest="action", required=True)
+    import snapshot_auto
+    snapshot_auto.add_parser(commands)
     hooks = commands.add_parser("hooks", help="Export native session-hook configuration")
     hooks.add_argument("--kind", choices=("claude", "codex"), required=True)
     hooks.add_argument("--output", type=sessions.native_path)

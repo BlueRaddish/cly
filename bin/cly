@@ -43,7 +43,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] || { [ "${BASH_VERSINFO[0]}" = 4 ] && [ "${BA
     exit 2
 fi
 
-CLY_VERSION=4.4.2
+CLY_VERSION=4.5.0
 CLY_SOURCE=${BASH_SOURCE[0]}
 case $CLY_SOURCE in /*|[A-Za-z]:*) ;; *) CLY_SOURCE=$PWD/$CLY_SOURCE ;; esac
 
@@ -1193,7 +1193,7 @@ cly — one command in front of every coding agent
 
 usage: cly [OPTION...] [PROFILE|.] [AGENT-ARG...]
        cly init [NAME] | cly config | cly help | cly version
-       cly snapshot [save|list|status|restore DATE|reload DATE|bind|adopt]
+       cly snapshot [save|list|status|restore DATE|reload DATE|auto|bind|adopt]
        cly document [capture|status|start|stop|catch-up|import|publish]
        cly handoff [export FILE|import FILE|list]
 

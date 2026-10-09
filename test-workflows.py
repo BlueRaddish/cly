@@ -629,4 +629,27 @@ with tempfile.TemporaryDirectory(prefix="cly-catch-up-") as temporary, patch.dic
         fails(lambda: w.catch_up(index, "audit", "chosen"), "revision mismatch")
         check(len(calls) == before)
 
+for adapter in ("x-terminal-emulator", "konsole"):
+    child = SimpleNamespace(wait=lambda **kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired(adapter, kwargs["timeout"])))
+    with patch.object(w.subprocess, "Popen", return_value=child) as start, patch.object(w.subprocess, "run") as wait:
+        w.launch_terminal([adapter, "fixture"])
+        check(start.call_count == 1 and not wait.called)
+        check(start.call_args.kwargs["stdout"] == subprocess.DEVNULL)
+    with patch.object(w.subprocess, "Popen", return_value=SimpleNamespace(wait=lambda **kwargs: 7)):
+        try:
+            w.launch_terminal([adapter])
+        except subprocess.CalledProcessError as exc:
+            check(exc.returncode == 7)
+        else:
+            raise AssertionError("Terminal failure was ignored")
+with patch.object(w.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as launch:
+    w.launch_terminal(["wt", "fixture"])
+    check(launch.call_args.kwargs["timeout"] == 30 and launch.call_args.kwargs["check"])
+with patch.object(w.sys, "platform", "linux"), patch.object(w, "os", SimpleNamespace(name="posix", environ=os.environ)):
+    registration = w.startup_registration(["/path/$USER/%literal", "argument"])
+    check('"/path/$$USER/%%literal"' in registration["value"])
+    snapshot_startup = w.startup_registration(["/path/$USER/%literal", "argument"], purpose="snapshot")
+    check("\nKillMode=process\n" in snapshot_startup["value"])
+    check("KillMode" not in registration["value"] and registration["name"] != snapshot_startup["name"])
+
 print(f"workflow checks: {checks} passed (fixtures + managed-process integration; no live agents or terminals)")

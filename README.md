@@ -11,11 +11,15 @@ $ cly -x -c          # the newest session of any agent, resumed, prompts off
 $ cly snapshot       # save active tracked launches
 $ cly snapshot restore latest --dry-run
 $ cly snapshot reload latest --dry-run   # preview stopping and reopening tracked agents
+$ cly snapshot auto enable              # checkpoint tracked sessions; restore after reboot
+$ cly snapshot auto status
 $ cly document start # maintain a local session-prose library every 15 minutes
 $ cly document catch-up --profile codex # one model reviews pending memories across agents
 ```
 
 Snapshots and documentation are an optional Python 3.9+ extension, with no third-party Python dependencies. Exact resume IDs and the original native histories are required for restore; new sessions that cannot expose their ID must be bound explicitly. See the [workflow guide](docs/workflows.md) for binding, date-based restore, provider coverage, verified PARA publication and curated filing plans. An optional GUI is recorded in the [roadmap](docs/roadmap.md).
+
+`cly snapshot auto enable` checks tracked sessions every 60 seconds and keeps one atomic, nonempty checkpoint when the inventory changes. Empty inventories and capture errors preserve it. Login restore after a new boot skips active conversations and prior launches without stopping agents; status records failures for review. Use `--interval SECONDS` or `--no-restore-on-login` to change capture behavior. This covers tracked or adopted agent conversations, not Terminal panes, layout or scrollback. See [automatic snapshots](docs/workflows.md#automatic-snapshots-and-restart-restore) for commands and restart safety.
 
 ## Why
 

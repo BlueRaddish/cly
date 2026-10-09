@@ -42,6 +42,62 @@ scrollback, shell state and running tools are outside the snapshot. Native histo
 must remain available in the agent's own store; the JSON snapshot is not a backup
 of that history.
 
+### Automatic snapshots and restart restore
+
+Enable a background checkpoint and per-user login startup:
+
+```sh
+cly snapshot auto enable
+cly snapshot auto enable --interval 120
+cly snapshot auto enable --no-restore-on-login
+cly snapshot auto status
+cly snapshot auto save                 # checkpoint now
+cly snapshot restore auto --dry-run
+cly snapshot reload auto --dry-run
+cly snapshot auto disable
+```
+
+The default interval is 60 seconds. Capture replaces one atomic checkpoint only
+when the tracked inventory changes. An empty inventory or capture error leaves
+the last nonempty checkpoint intact, so closing agents or an incomplete capture
+does not erase the restart inventory. `auto` selects this checkpoint separately
+from the ordinary dated snapshots. `--no-restore-on-login` starts capture at login
+without opening conversations.
+
+Automatic capture and `auto save` require exact native IDs and readable histories
+for every active tracked run. Unresolved or unreadable runs preserve the old
+checkpoint and appear as worker errors in status.
+
+At login after a new boot, automatic restore checks the same profiles,
+executables, directories, native histories and terminal adapter as manual restore.
+It skips conversations already active and launches already recorded for that
+boot. It never stops agents. Failures and partial launch outcomes remain in
+`snapshot auto status` for review and manual recovery; receipt counts show terminal
+launch results, not proof that each agent has finished resuming. Restarting the
+checkpoint worker during the same boot does not reopen the workspace again.
+
+After launch, automatic capture preserves the recovery checkpoint until all
+restored conversations appear active. Uncertain or failed launch receipts block
+automatic retries during that boot. Review status before manually retrying with
+`snapshot restore auto`; `snapshot auto save` explicitly replaces the recovery
+inventory with the current nonempty, fully readable inventory and supersedes a
+failure or readiness hold.
+
+The checkpoint covers only tracked or explicitly adopted agent conversations.
+It does not capture Terminal panes, window positions, split layouts, scrollback,
+shell state or arbitrary running tools. Resolve new conversation IDs through the
+supported hooks or explicit binding before relying on automatic restore.
+
+When replacing Windows Terminal's native saved-layout restore, back up its
+settings and set `firstWindowPreference` to `"defaultProfile"` separately to avoid
+duplicate reopening. This changes Terminal's first-window behavior; global
+Windows restart-app settings are outside cly's automatic snapshot setup.
+
+Manual `snapshot reload auto` retains the stop warning and confirmation described
+below. Preview first; choose `snapshot restore auto` when existing agents should
+keep running. Actual reboot validation is separate from isolated checkpoint and
+startup checks.
+
 ### Reload from a snapshot
 
 Reload stops **all currently tracked active agent process families**, then opens
