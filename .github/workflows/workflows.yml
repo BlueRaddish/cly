@@ -28,6 +28,11 @@ jobs:
         run: python test-handoffs-health.py
       - name: Snapshot reload safety and process shutdown
         run: python test-snapshot-reload.py
+      - name: Windows batch launch and managed console inheritance
+        if: runner.os == 'Windows'
+        run: |
+          python test-windows-batch.py
+          python test-snapshot-console.py
       - name: Launcher checks
         if: runner.os == 'Linux'
         run: |

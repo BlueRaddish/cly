@@ -274,6 +274,21 @@ with tempfile.TemporaryDirectory(prefix="cly-workflows-") as temporary:
             import base64
             check("codex-one" in base64.b64decode(encoded).decode("utf-16le"))
 
+        # Restore preview must check the terminal too, without launching it.
+        with patch.object(w, "select_snapshot", return_value=saved), \
+             patch.object(w, "restore_plan", return_value=[{"fixture": True}]), \
+             patch.object(w, "terminal_commands", side_effect=ValueError("Terminal unavailable")) as terminal, \
+             patch.object(w.subprocess, "run") as launch, \
+             redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as errors:
+            check(w.main(["snapshot", "restore", "latest", "--dry-run"]) == 1)
+            check("Terminal unavailable" in errors.getvalue() and terminal.called and not launch.called)
+        with patch.object(w, "select_snapshot", return_value=saved), \
+             patch.object(w, "restore_plan", return_value=[{"fixture": True}]), \
+             patch.object(w, "terminal_commands", return_value=[["fixture-terminal"]]) as terminal, \
+             patch.object(w.subprocess, "run") as launch, redirect_stdout(io.StringIO()):
+            check(w.main(["snapshot", "restore", "latest", "--dry-run"]) == 0)
+            check(terminal.called and not launch.called)
+
         # The actual detached collector is hidden, single-instance, and stoppable.
         try:
             with redirect_stdout(io.StringIO()):

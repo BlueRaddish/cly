@@ -754,6 +754,8 @@ has  'and names the host' 'ollama' "$(err)"
 # the same missing-tool branch can be checked without owning three machines.
 cat > "$work/os-env" <<'EOF'
 OSTYPE=$CLY_TEST_OSTYPE
+# Batch discovery also checks readable files; hide the real installed tools.
+PATH=
 command() {
     if [ "$1" = -v ]; then
         case ${2%.cmd} in claude|codex|agy|gemini|muse|kimi|qwen|opencode|ollama) return 1 ;; esac

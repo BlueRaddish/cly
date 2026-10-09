@@ -43,7 +43,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] || { [ "${BASH_VERSINFO[0]}" = 4 ] && [ "${BA
     exit 2
 fi
 
-CLY_VERSION=4.4.1
+CLY_VERSION=4.4.2
 CLY_SOURCE=${BASH_SOURCE[0]}
 case $CLY_SOURCE in /*|[A-Za-z]:*) ;; *) CLY_SOURCE=$PWD/$CLY_SOURCE ;; esac
 
@@ -350,14 +350,16 @@ cly_config_dir() {
 cly_basename() {
     local b=${1##*/}
     b=${b##*\\}
-    case $b in *.[eE][xX][eE]|*.[cC][mM][dD]) b=${b%.*} ;; esac
+    case $b in *.[eE][xX][eE]|*.[cC][mM][dD]|*.[bB][aA][tT]) b=${b%.*} ;; esac
     printf '%s\n' "$b"
 }
 
-# Bash finds .exe automatically on Windows, but not .cmd (Muse's official
-# launcher). Keep discovery and execution using the same resolved program.
+# Windows batch files can be readable without Bash's executable bit. Resolve
+# them explicitly, then use the same native execution bridge at every launch.
 cly_executable=''
 cly_find_program() {  # BIN → cly_executable; 1 if missing
+    local candidate directory suffix
+    local -a path_directories=()
     cly_executable=$1
     case ${OSTYPE:-} in
         msys*|mingw*|cygwin*)
@@ -365,14 +367,92 @@ cly_find_program() {  # BIN → cly_executable; 1 if missing
                 [A-Za-z]:[/\\]*) cly_executable=$(cly_to_posix "$cly_executable") ;;
             esac ;;
     esac
-    if command -v "$cly_executable" >/dev/null 2>&1; then
+    if candidate=$(command -v "$cly_executable" 2>/dev/null); then
+        case ${OSTYPE:-}:$candidate in
+            msys*:*.[cC][mM][dD]|msys*:*.[bB][aA][tT]|mingw*:*.[cC][mM][dD]|mingw*:*.[bB][aA][tT]|cygwin*:*.[cC][mM][dD]|cygwin*:*.[bB][aA][tT]) cly_executable=$candidate ;;
+        esac
         return 0
     fi
     case ${OSTYPE:-} in
         msys*|mingw*|cygwin*)
-            cly_executable+=.cmd
-            command -v "$cly_executable" >/dev/null 2>&1 ;;
+            for suffix in '' .cmd .bat; do
+                candidate=$cly_executable$suffix
+                case $candidate in
+                    *.[cC][mM][dD]|*.[bB][aA][tT]) ;;
+                    *) continue ;;
+                esac
+                case $candidate in
+                    */*)
+                        if [ -f "$candidate" ] && [ -r "$candidate" ]; then
+                            cly_executable=$candidate; return 0
+                        fi ;;
+                    *)
+                        IFS=: read -r -a path_directories <<< "$PATH:"
+                        for directory in "${path_directories[@]}"; do
+                            directory=${directory:-.}
+                            if [ -f "$directory/$candidate" ] && [ -r "$directory/$candidate" ]; then
+                                cly_executable=$directory/$candidate; return 0
+                            fi
+                        done
+                        ;;
+                esac
+            done
+            return 1 ;;
         *) return 1 ;;
+    esac
+}
+
+cly_exec_program() {  # PROGRAM ARG...; also used by the managed supervisor
+    local program=$1 argument count=0 powershell_code encoded
+    shift
+    case ${OSTYPE:-}:$program in
+        msys*:*.[cC][mM][dD]|msys*:*.[bB][aA][tT]|mingw*:*.[cC][mM][dD]|mingw*:*.[bB][aA][tT]|cygwin*:*.[cC][mM][dD]|cygwin*:*.[bB][aA][tT])
+            for argument in powershell.exe cygpath iconv base64; do
+                command -v "$argument" >/dev/null 2>&1 || { echo "cly: Windows batch launch requires $argument" >&2; return 1; }
+            done
+            program=$(cly_to_posix "$program")
+            [ -f "$program" ] && [ -r "$program" ] || { echo "cly: Windows batch file unavailable: $program" >&2; return 1; }
+            CLY_BATCH_TARGET=$(cygpath -aw "$program") || return $?
+            export CLY_BATCH_TARGET
+            for argument in "$@"; do
+                case $argument in *$'\r'*|*$'\n'*) echo 'cly: Windows batch arguments cannot contain line breaks' >&2; return 2 ;; esac
+                export "CLY_BATCH_ARG_$count=$argument"
+                count=$((count + 1))
+            done
+            export CLY_BATCH_COUNT=$count
+            # Values travel in the environment and expand once with delayed
+            # expansion disabled. Doubled quotes preserve literal quotes while
+            # keeping CMD metacharacters quoted; no user text becomes PS code.
+            # CMD has an 8191-character ceiling and line-based parsing. Refuse
+            # those payloads; use a native executable or stdin for larger data.
+            powershell_code='
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+Add-Type -TypeDefinition "using System.Runtime.InteropServices; public static class ClyBatchConsole { [DllImport(`"kernel32.dll`")] public static extern uint GetConsoleProcessList([Out] uint[] processes, uint count); }"
+$command = """""%CLY_BATCH_TARGET%"""
+$length = $env:CLY_BATCH_TARGET.Length + 3
+for ($i = 0; $i -lt [int]$env:CLY_BATCH_COUNT; $i++) {
+    $name = "CLY_BATCH_ARG_" + $i
+    $value = [Environment]::GetEnvironmentVariable($name)
+    $value = [regex]::Replace($value, "(\\*)""", "`$1`$1""""")
+    $value = [regex]::Replace($value, "(\\+)$", "`$1`$1")
+    [Environment]::SetEnvironmentVariable($name, """" + $value + """")
+    $length += $value.Length + 3
+    $command += " %" + $name + "%"
+}
+$command += """"
+if ($length -gt 8000) { throw "cly: Windows batch command exceeds the CMD command length limit" }
+$start = New-Object System.Diagnostics.ProcessStartInfo
+$start.FileName = $env:SystemRoot + "\System32\cmd.exe"
+$start.Arguments = "/d /v:off /s /c " + $command
+$start.UseShellExecute = $false
+$start.CreateNoWindow = [ClyBatchConsole]::GetConsoleProcessList([uint32[]]@(0), 1) -eq 0
+$process = [Diagnostics.Process]::Start($start)
+$process.WaitForExit()
+exit $process.ExitCode'
+            encoded=$(set -o pipefail; printf '%s' "$powershell_code" | iconv -f UTF-8 -t UTF-16LE | base64 -w 0) || return $?
+            exec powershell.exe -NoProfile -NonInteractive -EncodedCommand "$encoded" ;;
+        *) exec "$program" "$@" ;;
     esac
 }
 
@@ -1454,7 +1534,7 @@ cly_exec() {  # BIN FLAGS ENV BYPASS ARG...
         case ${1:-} in
             resume|exec|serve) muse_command=$1; shift ;;
             login|logout|auth|config|export|trace|model-profile|skills|voice|plugins|sandbox|schema|session-message|mcp|init)
-                exec "$bin" "$@" ;;
+                cly_exec_program "$bin" "$@"; return $? ;;
         esac
     fi
     # A remote Codex resume inherits the server session's permissions. Keep
@@ -1498,7 +1578,7 @@ cly_exec() {  # BIN FLAGS ENV BYPASS ARG...
         fi
     done
     if [ "${CLY_WORKFLOW_QUERY:-0}" = 1 ]; then
-        command -v "$bin" >/dev/null 2>&1 || { echo "cly: executable unavailable: $bin" >&2; return 1; }
+        cly_find_executable "$bin" || { echo "cly: executable unavailable: $bin" >&2; return 1; }
         local workflow_python='' store=''
         if cly_python; then
             local base=${CLY_SOURCE%/*} module
@@ -1511,7 +1591,7 @@ cly_exec() {  # BIN FLAGS ENV BYPASS ARG...
         return 0
     fi
     if [ "$remote" = 1 ]; then
-        "$bin" remote-control start || {
+        (cly_exec_program "$bin" remote-control start) || {
             echo "cly: Codex remote control could not start; session not launched" >&2
             return 1
         }
@@ -1533,7 +1613,7 @@ cly_exec() {  # BIN FLAGS ENV BYPASS ARG...
         fi
         [ "${CLY_TRACK:-auto}" != 1 ] || { echo 'cly: CLY_TRACK=1 requires Python 3.9+' >&2; return 2; }
     fi
-    exec "${final_command[@]}"
+    cly_exec_program "${final_command[@]}"
 }
 
 # The one flag -x adds — nothing, when the profile's standing flags already
@@ -2520,6 +2600,12 @@ cly_main() {
     cly_exec "$res_bin" "$res_flags" "$res_env" "$bypass" ${agent[@]+"${agent[@]}"}
 }
 
+if [ "${1:-}" = --cly-exec-agent ]; then
+    shift
+    [ "$#" -gt 0 ] || { echo 'cly: missing supervised agent program' >&2; exit 2; }
+    cly_exec_program "$@"
+    exit $?
+fi
 cly_main "$@"
 cly_rc=$?
 cly_trace "exit: $cly_rc"

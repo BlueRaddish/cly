@@ -103,6 +103,23 @@ def hidden():
     return {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
 
 
+def agent_console():
+    """Inherit an existing Windows console, keeping headless launches hidden."""
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        api = ctypes.WinDLL("kernel32", use_last_error=True)
+        api.GetConsoleProcessList.argtypes = [ctypes.POINTER(wintypes.DWORD), wintypes.DWORD]
+        api.GetConsoleProcessList.restype = wintypes.DWORD
+        # Console attachment survives redirected stdio and also covers ConPTY;
+        # CREATE_NO_WINDOW would discard it for the interactive agent child.
+        # Inheriting an existing windowless console also preserves capture
+        # pipes without opening a desktop window.
+        if api.GetConsoleProcessList((wintypes.DWORD * 1)(), 1):
+            return {}
+    return hidden()
+
+
 def birth(pid):
     """Return a live process's start identity, preventing PID-reuse restores."""
     return processes.birth(pid)
@@ -208,8 +225,8 @@ def supervise(args):
     termination_signals = (signal.SIGTERM,) + ((signal.SIGHUP,) if hasattr(signal, "SIGHUP") else ())
     previous_termination = {signum: signal.getsignal(signum) for signum in termination_signals}
     try:
-        child = subprocess.Popen([bash(), "-c", 'exec "$@"', "cly-agent", *command],
-                                 stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr, env=environment, **hidden())
+        child = subprocess.Popen(cly_command(["--cly-exec-agent", *command]),
+                                 stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr, env=environment, **agent_console())
         record.update(child_pid=child.pid, child_birth=birth(child.pid))
         atomic(path, record)
         for signum in termination_signals:
@@ -486,7 +503,7 @@ def snapshot_command(args):
     elif args.action == "save":
         value = save_snapshot()
         print(value["snapshot_id"])
-        print(f"{len(value['sessions'])} active sessions saved; " + str(sum(not r.get("session_id") for r in value["sessions"])) + " need native-ID binding")
+        print(f"{len(value['sessions'])} active tracked sessions saved; " + str(sum(not r.get("session_id") for r in value["sessions"])) + " need native-ID binding")
     elif args.action == "list":
         for value in snapshots():
             print(value["snapshot_id"], len(value["sessions"]), "sessions", value["host"])
@@ -529,10 +546,10 @@ def snapshot_command(args):
     elif args.action == "restore":
         value = select_snapshot(args.selector)
         plan = restore_plan(value, args.map_dir, args.skip_unresolved)
+        commands = terminal_commands(plan, args.terminal)
         print("Snapshot:", value["snapshot_id"])
         print(json.dumps(plan, indent=2, ensure_ascii=False))
         if not args.dry_run:
-            commands = terminal_commands(plan, args.terminal)
             for command in commands:
                 subprocess.run(command, check=True, **hidden())
             if args.terminal == "tmux":

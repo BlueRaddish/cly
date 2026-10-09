@@ -26,11 +26,15 @@ cly snapshot restore 2026-10-07
 
 Snapshots contain sessions whose tracked processes are still alive. Process start
 identities guard against a recycled PID being mistaken for the original process.
+Sessions opened outside cly are excluded unless explicitly adopted; visible
+terminal tabs and Desktop conversations are not an automatic capture inventory.
+Use `snapshot status` to review exactly what will be saved.
 The date selector is a **UTC date** and picks the latest snapshot that day. Use the
 full ID from `snapshot list` to select a specific saved inventory.
 
-Restore checks every selected session's profile, executable, directory and native
-history before opening terminals. A failed preflight opens nothing. `--dry-run`
+Restore checks every selected session's profile, executable, directory, native
+history and terminal adapter before opening terminals. A failed preflight opens
+nothing. `--dry-run`
 prints the selected snapshot and launch plan without opening terminals.
 
 This restores conversations through each agent's resume command. Terminal layout,
@@ -134,6 +138,14 @@ cly snapshot restore latest --terminal gnome-terminal
 
 `konsole` and `x-terminal-emulator` are also supported adapters. tmux restores a
 detached workspace; attach it using the workspace name shown by `tmux ls`.
+
+Windows managed agents inherit an attached console, including an invisible
+console used for captured output; background commands do not open desktop
+windows. Native `.cmd`/`.bat` launchers are resolved even without Bash's executable
+bit and preserve literal arguments through the native batch parser. That parser
+has a command-length limit; cly refuses batch arguments with line breaks or
+commands over 8,000 characters. Use a native executable profile or stdin for
+larger payloads.
 
 Profiles and native histories must exist on the destination machine. Home-relative
 directories map to the destination home when the hostname differs. Map other roots
@@ -363,14 +375,20 @@ Local files use restrictive permissions where the operating system supports them
 ```sh
 python test-workflows.py
 python test-snapshot-reload.py
+python test-windows-batch.py
+python test-snapshot-console.py
 python test-document-pipeline.py
 ```
 
 The workflow check exercises native format boundaries, model failures and receipt
 logic with fixtures. The reload check covers confirmation, preflight, process
 identity safety, stop failures and recovery with fixtures and disposable hidden
-processes. It does not stop real agent sessions or open terminals. The document
-pipeline check invokes the actual document commands against
+processes. It does not stop real agent sessions or open terminals.
+Windows batch and console checks execute literal argument fixtures and managed
+native probes inside an invisible ConPTY. They preserve captured output and
+console attachment without opening desktop windows or starting real agents.
+Actual provider UI and keyboard behavior require their own runtime check.
+The document pipeline check invokes the actual document commands against
 temporary stores and a local writer that copies and verifies bytes. It covers
 Unicode paths, revisions, malformed/torn sources, stale indexes, partial writes,
 changed remote notes and retries. These checks do not call live models or Drive.
