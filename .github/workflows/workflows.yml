@@ -28,6 +28,8 @@ jobs:
         run: python test-handoffs-health.py
       - name: Snapshot reload safety and process shutdown
         run: python test-snapshot-reload.py
+      - name: Snapshot permissions and resume options
+        run: python test-snapshot-options.py
       - name: Windows batch launch
         if: runner.os == 'Windows'
         run: python test-windows-batch.py
