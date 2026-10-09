@@ -97,7 +97,7 @@ Manual `snapshot reload auto` retains the stop warning and confirmation describe
 below. Preview first; choose `snapshot restore auto` when existing agents should
 keep running. Actual reboot validation is separate from isolated checkpoint and
 startup checks.
- 
+
 ### Saved resume settings
 
 New snapshots save validated resume options from the actual agent command,

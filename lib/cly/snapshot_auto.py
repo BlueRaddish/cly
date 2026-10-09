@@ -71,6 +71,12 @@ def tick(w, boot=None, explicit=False):
                       or not w.sessions.ID_RE.fullmatch(record["session_id"]) or record.get("history_present") is False]
         if unresolved:
             raise ValueError("Automatic checkpoint preserved: waiting for exact readable native sessions: " + ", ".join(unresolved))
+        for record in records:
+            if record.get("resume_options") is not None:
+                options = w.resume_options.validate(record["kind"], record["resume_options"])
+                if options.get("omitted_flags"):
+                    raise ValueError("Automatic checkpoint preserved: unsupported launch flags for " + record["profile"] + ": " +
+                                     ", ".join(options["omitted_flags"]))
         hold = w.read(folder(w) / "hold.json", {})
         manual_ready = False
         if hold.get("status") == "waiting" and hold.get("boot_id") == boot:
@@ -92,9 +98,10 @@ def tick(w, boot=None, explicit=False):
                 raise ValueError("Earlier-boot automatic checkpoint preserved until login restore completes")
             if (not explicit and not manual_ready and previous["boot_id"] != boot and receipt.get("boot_id") == boot
                     and receipt.get("status") == "complete"):
-                expected = {identity(w, dict(record, directory=w.restored_directory(record, (), previous.get("host") != w.socket.gethostname())))
-                            for record in previous["sessions"]}
-                live = {identity(w, record) for record in records if record.get("session_id")}
+                expected = ({json.dumps(item) for item in receipt["expected"]} if "expected" in receipt else
+                            {json.dumps(identity(w, dict(record, directory=w.restored_directory(record, (), previous.get("host") != w.socket.gethostname()))))
+                             for record in previous["sessions"]})
+                live = {json.dumps(identity(w, record)) for record in records if record.get("session_id")}
                 if not expected.issubset(live):
                     raise ValueError("Waiting for all restored conversations to become active; earlier checkpoint preserved")
             if not pending and not manual_ready and previous["boot_id"] == boot and inventory(previous["sessions"]) == inventory(records):
@@ -168,22 +175,24 @@ def restore_login(w, config, boot):
             return receipt
         w.atomic(path, receipt)
         try:
+            # Resolve the current configured store before deduplicating; a
+            # profile may now point at a relocated copy of its native history.
+            resolved = w.restore_plan(value)
+            unique = {entry_key(w, item): item for item in resolved}
+            receipt["expected"] = [json.loads(value) for value in sorted({json.dumps(identity(w, item)) for item in unique.values()})]
             live = {identity(w, record) for record in w.active() if record.get("session_id")}
             launched = {item["key"] for item in receipt["entries"] if item.get("status") in ("launched", "already-active")}
-            records = []
-            for record in value["sessions"]:
-                restored = dict(record, directory=w.restored_directory(record, (), value.get("host") != w.socket.gethostname()))
-                key = entry_key(w, restored)
+            plan = []
+            for key, item in unique.items():
                 if key in launched:
                     continue
-                if identity(w, restored) in live:
-                    receipt["entries"].append({"key": key, "status": "already-active", "profile": record["profile"],
-                                               "kind": record["kind"], "session_id": record.get("session_id")})
+                if identity(w, item) in live:
+                    receipt["entries"].append({"key": key, "status": "already-active", "profile": item["profile"],
+                                               "kind": item["kind"], "session_id": item.get("session_id")})
                     launched.add(key)
                 else:
-                    records.append(record)
-            # Preflight all missing conversations before opening any terminal.
-            plan = w.restore_plan(dict(value, sessions=records)) if records else []
+                    plan.append(item)
+            w.atomic(path, receipt)
             commands = w.terminal_commands(plan, config["terminal"]) if plan else []
             if len(commands) != len(plan):
                 raise ValueError("Terminal preflight returned an incomplete launch plan")
@@ -213,7 +222,8 @@ def restore_login(w, config, boot):
 
 def worker_status(w):
     value = w.read(folder(w) / "worker.json", {})
-    return dict(value, active=bool(value.get("pid") and w.alive(value)))
+    active = bool(value.get("pid") and value.get("status") != "stopped" and w.alive(value))
+    return dict(value, active=active, ready=bool(active and value.get("status") == "running" and value.get("boot_id")))
 
 
 def status(w):
@@ -288,17 +298,21 @@ def manage(w, args):
         w.atomic(path, config)
         # This invocation starts capture only. Login restoration is reserved for
         # the native startup command and an earlier boot's checkpoint.
+        child = None
         if not worker_status(w)["active"]:
             with (folder(w) / "watch.log").open("a", encoding="utf-8") as log:
                 child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                                          start_new_session=os.name != "nt", **w.hidden())
-            deadline = time.monotonic() + 10
-            while not worker_status(w)["active"]:
-                if child.poll() is not None:
-                    raise ValueError("Automatic snapshot worker exited before initialization; inspect snapshot auto status and watch.log")
-                if time.monotonic() >= deadline:
-                    raise ValueError("Automatic snapshot worker initialization timed out; inspect snapshot auto status and watch.log")
-                time.sleep(0.1)
+        deadline = time.monotonic() + 35
+        while True:
+            current = worker_status(w)
+            if current["ready"]:
+                break
+            if child is not None and child.poll() is not None and not current["active"]:
+                raise ValueError("Automatic snapshot worker exited before initialization; inspect snapshot auto status and watch.log")
+            if time.monotonic() >= deadline:
+                raise ValueError("Automatic snapshot worker initialization timed out; inspect snapshot auto status and watch.log")
+            time.sleep(0.1)
 
 
 def watch(w, args):
@@ -313,6 +327,7 @@ def watch(w, args):
             try:
                 boot = boot_id(w)
                 worker.update(boot_id=boot, status="running")
+                w.atomic(path, worker)
                 config = w.read(folder(w) / "config.json", {})
                 if args.login and config.get("enabled") and config.get("restore_on_login"):
                     try:

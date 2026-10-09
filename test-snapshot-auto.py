@@ -2,6 +2,7 @@
 """Run python test-snapshot-auto.py. No UI, startup settings, or live agents."""
 from contextlib import contextmanager
 from copy import deepcopy
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -36,7 +37,8 @@ with tempfile.TemporaryDirectory(prefix="cly-auto-test-") as temporary:
     temp = Path(temporary)
     record = {"schema": 1, "run_id": "fixture", "pid": 41001, "birth": "fixture-start", "profile": "codex-test",
               "kind": "codex", "session_id": "one", "directory": str(temp), "native_root": str(temp / "store"),
-              "bypass": False, "binding": "hook", "history_present": True, "resume_options": ["--sandbox", "workspace-write"]}
+              "bypass": False, "binding": "hook", "history_present": True,
+              "resume_options": w.resume_options.capture("codex", ["--sandbox", "workspace-write"])}
     config = {"enabled": True, "restore_on_login": True, "interval": 60, "terminal": "auto"}
 
     @contextmanager
@@ -68,7 +70,7 @@ with tempfile.TemporaryDirectory(prefix="cly-auto-test-") as temporary:
             check(not a.tick(w, "boot")["changed"])
         for field, value in (("profile", "different"), ("session_id", "two"), ("directory", str(temp / "other")),
                              ("native_root", str(temp / "new-store")), ("bypass", True),
-                             ("resume_options", ["--sandbox", "danger-full-access"]), ("binding", "manual")):
+                             ("resume_options", w.resume_options.capture("codex", ["--sandbox", "danger-full-access"])), ("binding", "manual")):
             with patch.object(w, "active", return_value=[dict(record, **{field: value})]):
                 check(a.tick(w, "boot")["changed"])
             a.tick(w, "boot")
@@ -95,6 +97,18 @@ with tempfile.TemporaryDirectory(prefix="cly-auto-test-") as temporary:
             check((a.folder(w) / "latest.json").read_bytes() == before)
         with patch.object(w, "active", return_value=[dict(record, discovery_errors=["unrelated corrupt history"], history_present=True)]):
             check(not a.tick(w, "boot")["changed"])
+
+    with case("capture-option-failure"):
+        checkpoint("boot")
+        before = (a.folder(w) / "latest.json").read_bytes()
+        bad = [(dict(record["resume_options"], omitted_flags=["--unsupported-launch-flag"]), "unsupported launch flags"),
+               (["--sandbox", "workspace-write"], "Invalid saved resume options"),
+               ({"args": ["--sandbox", "invalid-mode"], "omitted_flags": []}, "Unsupported saved resume arguments")]
+        for options, error in bad:
+            with patch.object(w, "active", return_value=[dict(record, resume_options=options)]):
+                fails(lambda: a.tick(w, "boot"), error)
+                fails(lambda: a.tick(w, "boot", explicit=True), error)
+            check((a.folder(w) / "latest.json").read_bytes() == before)
 
     with case("restore-same"), patch.object(w, "restore_plan") as preflight, patch.object(w, "launch_terminal", create=True) as launch:
         checkpoint("now")
@@ -123,10 +137,10 @@ with tempfile.TemporaryDirectory(prefix="cly-auto-test-") as temporary:
         with patch.object(w, "active", return_value=[record, dict(record, session_id="two")]):
             check(a.tick(w, "now")["changed"])
 
-    with case("same-conversation"), patch.object(w, "restore_plan") as preflight, patch.object(w, "launch_terminal", create=True) as launch:
+    with case("same-conversation"), patch.object(w, "restore_plan", side_effect=plan) as preflight, patch.object(w, "launch_terminal", create=True) as launch:
         checkpoint(records=[dict(record, profile="older-profile")])
         check(a.restore_login(w, config, "now")["entries"][0]["status"] == "already-active")
-        check(not preflight.called and not launch.called)
+        check(preflight.call_count == 1 and not launch.called)
 
     with case("duplicate-conversation"), patch.object(w, "restore_plan", side_effect=plan), patch.object(w, "terminal_commands", side_effect=terminals), patch.object(w, "launch_terminal", create=True) as launch:
         checkpoint(records=[record, dict(record, profile="alias")])
@@ -141,6 +155,23 @@ with tempfile.TemporaryDirectory(prefix="cly-auto-test-") as temporary:
         check(a.identity(w, record) != a.identity(w, dict(record, native_root=str(temp / "another-store"))))
         legacy = dict(record, native_root=None)
         check(a.identity(w, legacy) != a.identity(w, dict(legacy, profile="alias")))
+
+    with case("relocated-native-store"), patch.object(w, "terminal_commands", side_effect=terminals), patch.object(w, "launch_terminal", create=True) as launch:
+        old_records = [record, dict(record, profile="alias", native_root=str(temp / "old-other-root"))]
+        checkpoint(records=old_records)
+        current = dict(record, native_root=str(temp / "relocated-store"))
+
+        def relocated(value):
+            check(len(value["sessions"]) == 2)
+            return [dict(item, native_root=current["native_root"], argv=["fixture-agent"]) for item in value["sessions"]]
+
+        with patch.object(w, "restore_plan", side_effect=relocated), patch.object(w, "active", return_value=[current]):
+            result = a.restore_login(w, config, "now")
+            check(result["status"] == "complete" and len(result["expected"]) == 1)
+            check(result["expected"][0] == json.loads(json.dumps(a.identity(w, current))))
+            check(not launch.called)
+            check(a.tick(w, "now")["changed"])
+            check(a.latest(w)["sessions"][0]["native_root"] == current["native_root"])
 
     with case("partial"), patch.object(w, "restore_plan", side_effect=plan), patch.object(w, "terminal_commands", side_effect=terminals):
         old = checkpoint(records=[record, dict(record, session_id="two")])
@@ -245,12 +276,31 @@ with tempfile.TemporaryDirectory(prefix="cly-auto-test-") as temporary:
         check(worker["status"] == "stopped" and worker["birth"] == "worker-start")
         check(worker["changed"] and not restore.called)
 
+    with case("running-before-restore"), patch.object(a, "boot_id", return_value="now"), patch.object(w, "birth", return_value="worker-start"):
+        w.atomic(a.folder(w) / "config.json", config)
+
+        def restore_after_running(*args):
+            worker = w.read(a.folder(w) / "worker.json")
+            check(worker["status"] == "running" and worker["boot_id"] == "now" and worker["birth"] == "worker-start")
+            w.atomic(a.folder(w) / "config.json", dict(config, enabled=False))
+            return {"status": "complete"}
+
+        with patch.object(a, "restore_login", side_effect=restore_after_running):
+            check(a.watch(w, SimpleNamespace(login=True)) == 0)
+
+    with case("boot-error"), patch.object(a, "boot_id", side_effect=ValueError("OS identity failure")), patch.object(w, "birth", return_value="worker-start"):
+        fails(lambda: a.watch(w, SimpleNamespace(login=False)), "OS identity failure")
+        worker = w.read(a.folder(w) / "worker.json")
+        check(worker["status"] == "stopped" and worker["errors"] == ["OS identity failure"])
+        with patch.object(w, "alive", return_value=True):
+            check(not a.worker_status(w)["ready"] and not a.worker_status(w)["active"])
+
     args = w.parser().parse_args(["snapshot", "auto", "enable"])
     check(args.interval == 60 and not args.no_restore_on_login and args.terminal == "auto")
     check(w.parser().parse_args(["snapshot", "auto", "watch", "--login"]).login)
     check(w.parser().parse_args(["snapshot", "auto", "enable", "--no-restore-on-login"]).no_restore_on_login)
 
-    with case("enable"), patch.object(a, "launcher", return_value=(["fixture-pythonw", str(temp / "enable-launcher.py")], "fixture script")), patch.object(w, "startup_registration", return_value={"backend": "fixture", "name": "owned", "value": "command"}) as registration, patch.object(w, "set_startup") as install, patch.object(w, "registered_startup", return_value=True), patch.object(a.subprocess, "Popen") as spawn, patch.object(a, "worker_status", side_effect=[{"active": False}, {"active": True}, {"active": True}]):
+    with case("enable"), patch.object(a, "launcher", return_value=(["fixture-pythonw", str(temp / "enable-launcher.py")], "fixture script")), patch.object(w, "startup_registration", return_value={"backend": "fixture", "name": "owned", "value": "command"}) as registration, patch.object(w, "set_startup") as install, patch.object(w, "registered_startup", return_value=True), patch.object(a.subprocess, "Popen") as spawn, patch.object(a, "worker_status", side_effect=[{"active": False, "ready": False}, {"active": True, "ready": True}, {"active": True, "ready": True}]):
         a.manage(w, args)
         check(registration.call_args.kwargs["purpose"] == "snapshot")
         check(registration.call_args.args[0][-1] == "--login")
@@ -260,9 +310,13 @@ with tempfile.TemporaryDirectory(prefix="cly-auto-test-") as temporary:
         check(spawn.call_args.kwargs["stdin"] == subprocess.DEVNULL)
         check(a.status(w)["registered"])
 
-    with case("worker-failed"), patch.object(a, "launcher", return_value=(["fixture-pythonw", str(temp / "failed-launcher.py")], "fixture script")), patch.object(w, "startup_registration", return_value={"backend": "fixture", "name": "owned", "value": "command"}), patch.object(w, "set_startup"), patch.object(w, "registered_startup", return_value=True), patch.object(a.subprocess, "Popen") as spawn, patch.object(a, "worker_status", return_value={"active": False}):
+    with case("worker-failed"), patch.object(a, "launcher", return_value=(["fixture-pythonw", str(temp / "failed-launcher.py")], "fixture script")), patch.object(w, "startup_registration", return_value={"backend": "fixture", "name": "owned", "value": "command"}), patch.object(w, "set_startup"), patch.object(w, "registered_startup", return_value=True), patch.object(a.subprocess, "Popen") as spawn, patch.object(a, "worker_status", return_value={"active": False, "ready": False}):
         spawn.return_value.poll.return_value = 1
         fails(lambda: a.manage(w, args), "exited before initialization")
+
+    with case("worker-starting"), patch.object(a, "launcher", return_value=(["fixture-pythonw", str(temp / "starting-launcher.py")], "fixture script")), patch.object(w, "startup_registration", return_value={"backend": "fixture", "name": "owned", "value": "command"}), patch.object(w, "set_startup"), patch.object(w, "registered_startup", return_value=True), patch.object(a.subprocess, "Popen") as spawn, patch.object(a, "worker_status", side_effect=[{"active": True, "ready": False}, {"active": True, "ready": False}, {"active": True, "ready": True}]), patch.object(a.time, "sleep") as sleep:
+        a.manage(w, args)
+        check(not spawn.called and sleep.call_count == 1)
 
     with case("registration-conflict"), patch.object(a, "launcher", return_value=(["fixture-pythonw", str(temp / "conflict-launcher.py")], "fixture script")), patch.object(w, "startup_registration", return_value={"backend": "fixture", "name": "owned", "value": "command"}), patch.object(w, "set_startup", side_effect=ValueError("changed externally")), patch.object(a.subprocess, "Popen") as spawn:
         fails(lambda: a.manage(w, args), "changed externally")
