@@ -2274,7 +2274,9 @@ cly_main() {
                 [ $# -ge 2 ] || { cly_usage_error '--session needs KIND:ID'; return 2; }
                 session_key=$2; opt_r=1; shift 2 ;;
             --find)
-                [ $# -ge 2 ] && [ -n "$2" ] || { cly_usage_error '--find needs a session name'; return 2; }
+                if [ $# -lt 2 ] || [ -z "$2" ]; then
+                    cly_usage_error '--find needs a session name'; return 2
+                fi
                 session_find=$2; opt_r=1; shift 2 ;;
             -h|--help)    cly_help; return 0 ;;
             -V|--version) echo "cly $CLY_VERSION"; return 0 ;;
