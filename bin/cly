@@ -441,7 +441,7 @@ for ($i = 0; $i -lt [int]$env:CLY_BATCH_COUNT; $i++) {
     $command += " %" + $name + "%"
 }
 $command += """"
-if ($length -gt 8000) { throw "cly: Windows batch command exceeds the CMD command length limit" }
+if ($length -gt 8000 -or $command.Length -gt 8000) { throw "cly: Windows batch command exceeds the CMD command length limit" }
 $start = New-Object System.Diagnostics.ProcessStartInfo
 $start.FileName = $env:SystemRoot + "\System32\cmd.exe"
 $start.Arguments = "/d /v:off /s /c " + $command

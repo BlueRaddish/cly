@@ -121,5 +121,8 @@ with tempfile.TemporaryDirectory(prefix="cly-batch-") as temporary:
         check(not receipt.exists())
     result = run(["--cly-exec-agent", str(batch), "safe"], {"CLY_TEST_FAIL_ENCODER": "1"})
     check(result.returncode == 73 and not receipt.exists())
+    result = run(["--cly-exec-agent", str(batch), *([""] * 600)])
+    check(result.returncode != 0 and "length limit" in result.stderr)
+    check(not receipt.exists())
 
 print(str(checks) + " Windows batch checks passed (real CMD/BAT, literal argv, no agents or GUI)")
