@@ -1103,8 +1103,8 @@ for subcommand in login logout auth config export trace model-profile skills voi
 done
 
 # Native Windows Muse installs muse.cmd, which Bash does not find as muse.
-# Simulate that PATH layout with a runnable fixture; the real cmd shim is
-# also exercised manually on Windows with cly muse --version.
+# Simulate that PATH layout for discovery on every platform; execute the
+# native CMD fixture only on Windows, as covered by test-windows-batch.py too.
 rm "$work/bin/muse"
 case $OSTYPE in
     msys*|mingw*|cygwin*)
@@ -1126,14 +1126,19 @@ has 'Muse cmd launcher is installed in the menu' 'muse      Muse Code    install
 out=$(BASH_ENV="$work/windows-env" ask $'\n\n' init muse); rc=$?
 eq 'Muse cmd launcher setup needs only flags and directory' 0 "$rc"
 has 'Muse cmd setup stores its stable command name' 'profile.muse.bin=muse' "$(config)"
-out=$(CLY_BIN='' BASH_ENV="$work/windows-env" run -x muse resume 'session with spaces'); rc=$?
-out=${out//$'\r'/}
-eq 'Muse cmd launcher runs by its bare name' 0 "$rc"
-has 'Muse cmd launch preserves the native resume arguments' 'ARG=session with spaces' "$out"
-eq 'Muse cmd launch adds bypass once' 1 "$(printf '%s\n' "$out" | grep -c '^ARG=--yolo$')"
-out=$(CLY_BIN='' BASH_ENV="$work/windows-env" run muse 'a prompt with spaces' --model muse-spark-1.2)
-out=${out//$'\r'/}
-has 'Muse cmd launch preserves prompts and flags' $'ARG=a prompt with spaces\nARG=--model\nARG=muse-spark-1.2' "$out"
+case $OSTYPE in
+    msys*|mingw*|cygwin*)
+        out=$(CLY_BIN='' BASH_ENV="$work/windows-env" run -x muse resume 'session with spaces'); rc=$?
+        out=${out//$'\r'/}
+        eq 'Muse cmd launcher runs by its bare name' 0 "$rc"
+        has 'Muse cmd launch preserves the native resume arguments' 'ARG=session with spaces' "$out"
+        eq 'Muse cmd launch adds bypass once' 1 "$(printf '%s\n' "$out" | grep -c '^ARG=--yolo$')"
+        out=$(CLY_BIN='' BASH_ENV="$work/windows-env" run muse 'a prompt with spaces' --model muse-spark-1.2)
+        out=${out//$'\r'/}
+        has 'Muse cmd launch preserves prompts and flags' $'ARG=a prompt with spaces\nARG=--model\nARG=muse-spark-1.2' "$out"
+        ;;
+    *) note 'Muse CMD execution (Windows only)' ;;
+esac
 cp "$stub" "$work/bin/muse"
 rm "$work/bin/muse.cmd"
 
