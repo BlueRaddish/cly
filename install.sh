@@ -119,6 +119,8 @@ if [ "$on_windows" = 1 ] && [ -r "$src_cmd" ]; then
     {
         printf '@echo off\r\n'
         printf 'rem Written by cly'"'"'s install.sh - runs the clone in place, so a\r\n'
+        # Backticks belong to the generated cmd comment.
+        # shellcheck disable=SC2016
         printf 'rem `git pull` there upgrades this command too.\r\n'
         printf '"%s" %%*\r\n' "$win_cmd"
         printf 'exit /b %%ERRORLEVEL%%\r\n'

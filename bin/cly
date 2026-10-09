@@ -236,7 +236,7 @@ cly_config_put_profile() {  # NAME BIN FLAGS DIR [KIND]
                     out+=("profile.$name.dir=$dir")
                     case $kind in ''|-) ;; *) out+=("profile.$name.kind=$kind") ;; esac
                 fi
-                rest=${line#profile.$name.}
+                rest=${line#profile."$name".}
                 key=${rest%%=*}
                 case $key in
                     bin|flags|dir) ;;
@@ -332,7 +332,7 @@ cly_to_posix() {
 cly_expand_tilde() {
     case $1 in
         '~')   printf '%s\n' "$HOME" ;;
-        '~/'*) printf '%s\n' "$HOME/${1#'~/'}" ;;
+        \~/*) printf '%s\n' "$HOME/${1#'~/'}" ;;
         *)     printf '%s\n' "$1" ;;
     esac
 }
@@ -570,6 +570,8 @@ cly_read_lines() {  # FILE
     [ -r "$1" ] || return 1
     c=$(<"$1") || return 1
     set -f
+    # Deliberate newline split; globbing is disabled for literal prompt text.
+    # shellcheck disable=SC2206
     lines=($c)
     set +f
 }
@@ -629,7 +631,7 @@ cly_epoch() {  # TIMESTAMP → epoch
 # after the colon; callers close it first (line=${line//\": /\":}).
 cly_json_str() {  # KEY LINE → jv; 1 when the key is not there
     local rest run
-    rest=${2##*\"$1\":\"}
+    rest=${2##*\""$1"\":\"}
     [ "$rest" != "$2" ] || { jv=''; return 1; }
     jv=''
     # Up to the first quote that is not escaped: an odd run of backslashes
@@ -646,7 +648,7 @@ cly_json_str() {  # KEY LINE → jv; 1 when the key is not there
 
 # The same for a number.
 cly_json_num() {  # KEY LINE → jv; 0 and 1 when the key is not there
-    jv=${2##*\"$1\":}
+    jv=${2##*\""$1"\":}
     [ "$jv" != "$2" ] || { jv=0; return 1; }
     jv=${jv%%[,\}]*}
     jv=${jv%%.*}
@@ -945,7 +947,14 @@ cly_sessions_all() {  # [KIND]
     fi
     for k in $CLY_LISTABLE; do
         [ -z "${1:-}" ] || [ "$1" = "$k" ] || continue
-        "cly_sessions_$k"
+        # Keep built-in readers explicit so static checks reach their helpers.
+        case $k in
+            claude) cly_sessions_claude ;;
+            codex) cly_sessions_codex ;;
+            gemini) cly_sessions_gemini ;;
+            kimi) cly_sessions_kimi ;;
+            *) "cly_sessions_$k" ;;
+        esac
     done
 }
 
@@ -955,8 +964,8 @@ cly_sessions_all() {  # [KIND]
 # equal timestamps retain the picker's existing tie order.
 cly_sort_rows() {
     local n=${#ses_rows[@]} i j k width start mid end
-    local -a r=() merged=()
-    for ((i = n - 1; i >= 0; i--)); do r+=("${ses_rows[i]}"); done
+    local -a sorted_rows=() merged=()
+    for ((i = n - 1; i >= 0; i--)); do sorted_rows+=("${ses_rows[i]}"); done
     for ((width = 1; width < n; width *= 2)); do
         merged=()
         for ((start = 0; start < n; start += 2 * width)); do
@@ -964,16 +973,16 @@ cly_sort_rows() {
             end=$((start + 2 * width)); [ "$end" -le "$n" ] || end=$n
             i=$start; j=$mid
             for ((k = start; k < end; k++)); do
-                if [ "$i" -lt "$mid" ] && { [ "$j" -ge "$end" ] || [ "${r[i]%%"$CLY_US"*}" -ge "${r[j]%%"$CLY_US"*}" ]; }; then
-                    merged+=("${r[i]}"); i=$((i + 1))
+                if [ "$i" -lt "$mid" ] && { [ "$j" -ge "$end" ] || [ "${sorted_rows[i]%%"$CLY_US"*}" -ge "${sorted_rows[j]%%"$CLY_US"*}" ]; }; then
+                    merged+=("${sorted_rows[i]}"); i=$((i + 1))
                 else
-                    merged+=("${r[j]}"); j=$((j + 1))
+                    merged+=("${sorted_rows[j]}"); j=$((j + 1))
                 fi
             done
         done
-        r=("${merged[@]}")
+        sorted_rows=("${merged[@]}")
     done
-    ses_rows=(${r[@]+"${r[@]}"})
+    ses_rows=(${sorted_rows[@]+"${sorted_rows[@]}"})
 }
 
 # Bring the N newest rows to the front, in order. Selection, not a full sort:
@@ -1057,13 +1066,13 @@ cly_print_sessions() {
 
 # "claude (default), codex" — the profiles as a sentence.
 cly_profiles_line() {  # DEFAULT-NAME
-    local d=$1 n out=''
+    local d=$1 n profile_line=''
     # shellcheck disable=SC2086
     for n in $cfg_profiles; do
         [ "$n" = "$d" ] && n="$n (default)"
-        out="${out:+$out, }$n"
+        profile_line="${profile_line:+$profile_line, }$n"
     done
-    printf '%s\n' "$out"
+    printf '%s\n' "$profile_line"
 }
 
 # Tier 0: what a bare `cly` prints when there is no terminal to offer the menu
@@ -1931,35 +1940,35 @@ cly_screen_line() {  # LINE-INDEX TEXT
 
 cly_screen_draw() {  # TITLE HINT HEADER CUR TOP NOTE
     local title=$1 hint=$2 header=$3 cur=$4 top=$5 note=$6
-    local out='' j n avail eol='' lines=0 w
+    local screen_output='' j n avail eol='' line_count=0 w
     n=${#scr_match[@]}
     avail=$scr_view
     w=$(( scr_cols - 1 ))
     if [ "$scr_live" = 1 ]; then
         eol=$'\e[K'
-        [ "$scr_drawn" -gt 0 ] && out=$'\e['"$scr_drawn"$'A\r'
+        [ "$scr_drawn" -gt 0 ] && screen_output=$'\e['"$scr_drawn"$'A\r'
     fi
     cly_screen_titletext "$title" "$cur" "$n" "$note"
-    out+="$titletext$eol"$'\n'; lines=$(( lines + 1 ))
+    screen_output+="$titletext$eol"$'\n'; line_count=$(( line_count + 1 ))
     cly_clip "$hint" "$w"
-    if [ "$scr_live" = 1 ]; then out+=$'\e[2m'"$clipped"$'\e[0m'"$eol"$'\n'; else out+="$clipped"$'\n'; fi
-    lines=$(( lines + 1 ))
+    if [ "$scr_live" = 1 ]; then screen_output+=$'\e[2m'"$clipped"$'\e[0m'"$eol"$'\n'; else screen_output+="$clipped"$'\n'; fi
+    line_count=$(( line_count + 1 ))
     if [ -n "$header" ]; then
         cly_clip "$header" "$w"
-        if [ "$scr_live" = 1 ]; then out+=$'\e[2;4m'"$clipped"$'\e[0m'"$eol"$'\n'; else out+="$clipped"$'\n'; fi
+        if [ "$scr_live" = 1 ]; then screen_output+=$'\e[2;4m'"$clipped"$'\e[0m'"$eol"$'\n'; else screen_output+="$clipped"$'\n'; fi
     else
-        out+="$eol"$'\n'
+        screen_output+="$eol"$'\n'
     fi
-    lines=$(( lines + 1 ))
+    line_count=$(( line_count + 1 ))
     for ((j = top; j < top + avail && j < n; j++)); do
         cly_screen_rowtext "$j" "$cur"
-        out+="$rowtext$eol"$'\n'
-        lines=$(( lines + 1 ))
+        screen_output+="$rowtext$eol"$'\n'
+        line_count=$(( line_count + 1 ))
     done
-    if [ "$n" = 0 ]; then out+="  (nothing matches)$eol"$'\n'; lines=$(( lines + 1 )); fi
-    [ "$scr_live" = 1 ] && out+=$'\e[J'
-    printf '%s' "$out"
-    scr_drawn=$lines
+    if [ "$n" = 0 ]; then screen_output+="  (nothing matches)$eol"$'\n'; line_count=$(( line_count + 1 )); fi
+    [ "$scr_live" = 1 ] && screen_output+=$'\e[J'
+    printf '%s' "$screen_output"
+    scr_drawn=$line_count
 }
 
 # CLY_DEBUG=FILE: a line per step of the screen, for a terminal that
