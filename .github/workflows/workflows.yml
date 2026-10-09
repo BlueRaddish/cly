@@ -26,6 +26,8 @@ jobs:
           python test-session-list.py
       - name: Portable handoffs and capture health
         run: python test-handoffs-health.py
+      - name: Snapshot reload safety and process shutdown
+        run: python test-snapshot-reload.py
       - name: Launcher checks
         if: runner.os == 'Linux'
         run: |

@@ -38,6 +38,52 @@ scrollback, shell state and running tools are outside the snapshot. Native histo
 must remain available in the agent's own store; the JSON snapshot is not a backup
 of that history.
 
+### Reload from a snapshot
+
+Reload stops **all currently tracked active agent process families**, then opens
+the conversations in the selected snapshot. Preview it from a separate terminal:
+
+```sh
+cly snapshot reload latest --dry-run
+cly snapshot reload 2026-10-08
+cly snapshot reload SNAPSHOT_ID --terminal wt
+```
+
+The preview lists the processes to stop and conversations to reopen. It does not
+save a snapshot, stop processes or open terminals. Reload validates the selected
+profiles, executables, directories, native histories and terminal adapter before
+asking you to type `reload` when active sessions will be stopped. It repeats
+preflight after confirmation and refuses
+if the active inventory or process families changed. PID start identities protect
+against PID reuse. Running reload from an agent it would stop is refused; use a
+separate terminal.
+
+The warning includes currently running sessions. cly cannot determine whether
+they are idle, generating a response or running tools, so save any work first.
+`--yes` accepts the warning without a prompt and is required before stopping
+sessions noninteractively. On Unix, reload sends SIGTERM and waits; `--force`
+allows SIGKILL for processes that do not exit. Windows uses verified process
+handles and immediate termination,
+so the same warning applies even without `--force`.
+
+Before stopping, cly saves a recovery snapshot of the current tracked inventory
+and writes a receipt under the workflow state's `reloads` directory. Unbound
+sessions remain in the recovery inventory but cannot be resumed until their
+native IDs are resolved. Recovery inventories are normal snapshots and become
+the new `latest`; use the printed selected snapshot ID to repeat the same reload.
+A stop failure prevents all reopening. A terminal launch
+failure records the completed launches and prints the selected snapshot's restore
+command for recovery. Automatic rollback is omitted because retrying already
+opened conversations could create duplicates. Inspect the receipt before retrying
+a partial launch. Receipts record terminal adapter results; they do not verify
+that the agent inside each terminal has finished starting or resumed successfully.
+
+Reload supports the same selector, `--map-dir`, `--terminal` and
+`--skip-unresolved` options as restore. `--skip-unresolved` only limits what is
+reopened: all tracked active agent families are still stopped. Untracked sessions,
+terminal shells, terminal windows, window layouts and shared daemons outside those
+process families remain outside its scope.
+
 ### Bind a new conversation
 
 Claude provides a new-session ID flag, so cly assigns an exact ID when starting a
@@ -316,14 +362,18 @@ Local files use restrictive permissions where the operating system supports them
 
 ```sh
 python test-workflows.py
+python test-snapshot-reload.py
 python test-document-pipeline.py
 ```
 
-The first command exercises native format boundaries, model failures and receipt
-logic with fixtures. The second invokes the actual document commands against
+The workflow check exercises native format boundaries, model failures and receipt
+logic with fixtures. The reload check covers confirmation, preflight, process
+identity safety, stop failures and recovery with fixtures and disposable hidden
+processes. It does not stop real agent sessions or open terminals. The document
+pipeline check invokes the actual document commands against
 temporary stores and a local writer that copies and verifies bytes. It covers
 Unicode paths, revisions, malformed/torn sources, stale indexes, partial writes,
-changed remote notes and retries. Neither calls live models or Drive.
+changed remote notes and retries. These checks do not call live models or Drive.
 
 To include an installed PARA validator without publishing, pass
 `--validator-root PATH_TO_DIRECTORY_CONTAINING_PARALIB` to the second command.

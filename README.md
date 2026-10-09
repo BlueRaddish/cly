@@ -10,6 +10,7 @@ $ cly -r             # every agent's sessions on one screen; Enter resumes the o
 $ cly -x -c          # the newest session of any agent, resumed, prompts off
 $ cly snapshot       # save active tracked launches
 $ cly snapshot restore latest --dry-run
+$ cly snapshot reload latest --dry-run   # preview stopping and reopening tracked agents
 $ cly document start # maintain a local session-prose library every 15 minutes
 $ cly document catch-up --profile codex # one model reviews pending memories across agents
 ```

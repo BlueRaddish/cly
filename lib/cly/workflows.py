@@ -2,7 +2,7 @@
 """Optional cly workflow management. Python 3.9+, standard library only."""
 import argparse
 import base64
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 import json
 import os
@@ -17,6 +17,7 @@ import sys
 import time
 import uuid
 
+import processes
 import sessions
 
 SCRIPT = Path(__file__).resolve().parents[2] / "bin/cly"
@@ -104,42 +105,16 @@ def hidden():
 
 def birth(pid):
     """Return a live process's start identity, preventing PID-reuse restores."""
-    if os.name == "nt":
-        import ctypes
-        from ctypes import wintypes
-        api = ctypes.WinDLL("kernel32", use_last_error=True)
-        api.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        api.OpenProcess.restype = wintypes.HANDLE
-        api.CloseHandle.argtypes = [wintypes.HANDLE]
-        api.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
-        api.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
-        handle = api.OpenProcess(0x1000, False, int(pid))
-        if not handle:
-            return None
-        try:
-            code = wintypes.DWORD()
-            stamps = [wintypes.FILETIME() for _ in range(4)]
-            if not api.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != 259:
-                return None
-            if not api.GetProcessTimes(handle, *(ctypes.byref(s) for s in stamps)):
-                return None
-            return str((stamps[0].dwHighDateTime << 32) | stamps[0].dwLowDateTime)
-        finally:
-            api.CloseHandle(handle)
-    if sys.platform.startswith("linux"):
-        try:
-            fields = Path(f"/proc/{int(pid)}/stat").read_text().rsplit(")", 1)[1].split()
-            return fields[19] if fields[0] != "Z" else None
-        except (OSError, ValueError, IndexError):
-            return None
-    result = subprocess.run(["ps", "-p", str(int(pid)), "-o", "lstart=", "-o", "stat="], capture_output=True, text=True)
-    value = result.stdout.strip()
-    return value if result.returncode == 0 and value and not value.split()[-1].startswith("Z") else None
+    return processes.birth(pid)
+
+
+def birth_matches(actual, expected):
+    return processes.birth_matches(actual, expected)
 
 
 def alive(record):
-    return bool(record.get("birth") and birth(record["pid"]) == record["birth"]
-                or record.get("child_birth") and birth(record["child_pid"]) == record["child_birth"])
+    return bool(record.get("birth") and birth_matches(birth(record["pid"]), record["birth"])
+                or record.get("child_birth") and birth_matches(birth(record["child_pid"]), record["child_birth"]))
 
 
 def bash():
@@ -262,8 +237,8 @@ def safe_component(value, label):
     return value
 
 
-def save_snapshot():
-    records = active()
+def save_snapshot(records=None):
+    records = [dict(record) for record in (active() if records is None else records)]
     if not records:
         raise ValueError("No active tracked sessions. Launch through cly, or use snapshot adopt for an existing process.")
     sid = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ-") + uuid.uuid4().hex[:8]
@@ -410,7 +385,96 @@ def terminal_commands(plan, terminal):
     return commands
 
 
+def reload_scope(records):
+    fields = ("run_id", "profile", "kind", "session_id", "pid", "birth",
+              "child_pid", "child_birth", "directory")
+    return sorted(tuple(str(record.get(field, "")) for field in fields) for record in records)
+
+
+def reload_snapshot(args):
+    from dataclasses import asdict
+    with nullcontext() if args.dry_run else lock(state() / "reload.lock"):
+        value = select_snapshot(args.selector)
+        plan = restore_plan(value, args.map_dir, args.skip_unresolved)
+        commands = terminal_commands(plan, args.terminal)
+        records = active()
+        targets = processes.plan(records)
+        print("Snapshot:", value["snapshot_id"])
+        print(json.dumps({"stop_sessions": [{key: record.get(key) for key in
+                          ("run_id", "profile", "kind", "session_id")} for record in records],
+                          "stop_processes": [asdict(target) for target in targets],
+                          "restore": plan}, indent=2, ensure_ascii=False))
+        if args.dry_run:
+            return 0
+        if targets:
+            print(f"WARNING: Reload will stop {len(records)} running tracked agent sessions "
+                  f"and their {len(targets)} processes. In-progress work and tools may be interrupted.", file=sys.stderr)
+            print("cly cannot reliably detect busy turns or save unsaved application state.", file=sys.stderr)
+            if os.name == "nt":
+                print("Windows uses immediate process termination after confirmation.", file=sys.stderr)
+            if any(not record.get("session_id") for record in records):
+                print("Some running sessions lack native IDs; their recovery inventory cannot automatically resume them.", file=sys.stderr)
+            if not args.yes:
+                if not sys.stdin.isatty():
+                    raise ValueError("Reload needs confirmation in a terminal; use --yes only after reviewing --dry-run")
+                try:
+                    confirmed = input("Type reload to stop these sessions and reopen the snapshot: ").strip() == "reload"
+                except EOFError:
+                    confirmed = False
+                if not confirmed:
+                    print("Reload cancelled; no sessions stopped.")
+                    return 2
+        current = active()
+        if reload_scope(current) != reload_scope(records):
+            raise ValueError("Running sessions changed during reload review; nothing stopped. Review and retry.")
+        # Revalidate after a potentially long prompt, keeping the selected
+        # snapshot pinned even when the recovery save becomes the new latest.
+        plan = restore_plan(value, args.map_dir, args.skip_unresolved)
+        commands = terminal_commands(plan, args.terminal)
+        recovery = save_snapshot(records=current) if current else None
+        identifier = uuid.uuid4().hex
+        path = state() / "reloads" / (identifier + ".json")
+        receipt = {"schema": SCHEMA, "reload_id": identifier, "snapshot_id": value["snapshot_id"],
+                   "recovery_snapshot_id": recovery["snapshot_id"] if recovery else None,
+                   "created": now(), "status": "prepared", "stop_processes": [asdict(target) for target in targets],
+                   "restore": [{key: item[key] for key in ("profile", "kind", "session_id", "directory")} for item in plan],
+                   "opened": []}
+        atomic(path, receipt)
+        if recovery:
+            print("Recovery snapshot:", recovery["snapshot_id"])
+        print("Reload receipt:", path)
+        phase = "stop"
+        try:
+            receipt["status"] = "stopping"
+            atomic(path, receipt)
+            processes.stop(targets, timeout=5.0, force=args.force)
+            receipt["status"] = "stopped"
+            atomic(path, receipt)
+            phase = "open"
+            receipt["status"] = "opening"
+            atomic(path, receipt)
+            for index, command in enumerate(commands):
+                subprocess.run(command, check=True, **hidden())
+                receipt["opened"].append(index)
+                atomic(path, receipt)
+        except (OSError, ValueError, subprocess.SubprocessError, KeyboardInterrupt) as exc:
+            receipt.update(status="failed", failed_phase=phase, error=str(exc), finished=now())
+            atomic(path, receipt)
+            recovery_hint = " Recovery inventory: " + recovery["snapshot_id"] + "." if recovery else ""
+            raise ValueError("Reload failed during " + phase + "; " + str(exc) + recovery_hint +
+                             " See " + str(path) + ". Restore the selected snapshot with: cly snapshot restore " +
+                             value["snapshot_id"] + ". Check already opened sessions before retrying.") from exc
+        receipt.update(status="complete", finished=now())
+        atomic(path, receipt)
+        print("Reload complete:", len(plan), "session terminals launched from", value["snapshot_id"])
+        if args.terminal == "tmux":
+            print("Use tmux ls and tmux attach -t cly-... to open the restored workspace.")
+        return 0
+
+
 def snapshot_command(args):
+    if args.action == "reload":
+        return reload_snapshot(args)
     if args.action in {"hooks", "event"}:
         import tracking
         value = tracking.hook_config(args.kind) if args.action == "hooks" else tracking.receive(args.kind, run_id=args.run_id)
@@ -1485,12 +1549,16 @@ def parser():
     event.add_argument("--run-id")
     for action in ("save", "list", "status"):
         commands.add_parser(action)
-    restore = commands.add_parser("restore")
-    restore.add_argument("selector", nargs="?", default="latest", help="latest, YYYY-MM-DD (UTC), or snapshot ID")
-    restore.add_argument("--dry-run", action="store_true")
-    restore.add_argument("--skip-unresolved", action="store_true")
-    restore.add_argument("--map-dir", action="append", default=[])
-    restore.add_argument("--terminal", default="auto", choices=("auto", "wt", "terminal", "tmux", "gnome-terminal", "konsole", "x-terminal-emulator"))
+    for action in ("restore", "reload"):
+        restore = commands.add_parser(action, help="Stop tracked agents and reopen a snapshot with confirmation" if action == "reload" else "Reopen a saved snapshot")
+        restore.add_argument("selector", nargs="?", default="latest", help="latest, YYYY-MM-DD (UTC), or snapshot ID")
+        restore.add_argument("--dry-run", action="store_true")
+        restore.add_argument("--skip-unresolved", action="store_true")
+        restore.add_argument("--map-dir", action="append", default=[])
+        restore.add_argument("--terminal", default="auto", choices=("auto", "wt", "terminal", "tmux", "gnome-terminal", "konsole", "x-terminal-emulator"))
+        if action == "reload":
+            restore.add_argument("--yes", action="store_true", help="Confirm stopping all tracked agent families without an interactive prompt")
+            restore.add_argument("--force", action="store_true", help="Also SIGKILL stubborn Unix processes after the graceful stop timeout")
     bind = commands.add_parser("bind")
     bind.add_argument("run_id")
     bind.add_argument("session_id")

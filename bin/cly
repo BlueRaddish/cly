@@ -43,7 +43,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] || { [ "${BASH_VERSINFO[0]}" = 4 ] && [ "${BA
     exit 2
 fi
 
-CLY_VERSION=4.4.0
+CLY_VERSION=4.4.1
 CLY_SOURCE=${BASH_SOURCE[0]}
 case $CLY_SOURCE in /*|[A-Za-z]:*) ;; *) CLY_SOURCE=$PWD/$CLY_SOURCE ;; esac
 
@@ -1100,7 +1100,7 @@ cly — one command in front of every coding agent
 
 usage: cly [OPTION...] [PROFILE|.] [AGENT-ARG...]
        cly init [NAME] | cly config | cly help | cly version
-       cly snapshot [save|list|status|restore DATE|bind|adopt]
+       cly snapshot [save|list|status|restore DATE|reload DATE|bind|adopt]
        cly document [capture|status|start|stop|catch-up|import|publish]
        cly handoff [export FILE|import FILE|list]
 
@@ -1124,7 +1124,7 @@ COMMANDS
   config       show what is configured, and what would run
   help         show this help
   version      show the version
-  snapshot     save active managed sessions; restore by UTC date or ID
+  snapshot     save, restore or safely reload tracked sessions by UTC date or ID
   document     collect session prose; review and publish with separate receipts
                snapshot/document need Python 3.9+; use COMMAND --help
   handoff      transfer selected context with identities, revisions and sources

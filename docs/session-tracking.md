@@ -87,6 +87,31 @@ cly reports hooks as available and keeps manual binding for that boundary.
 Explicit resume IDs and ordinary new Claude IDs remain supported independently.
 The exact hook association is never inferred from the newest file or timing.
 
+## Reload saved sessions
+
+```sh
+cly snapshot reload latest --dry-run
+cly snapshot reload SNAPSHOT_ID
+```
+
+Reload previews all tracked active agent families to stop and the saved
+conversations to reopen, then asks you to type `reload` before stopping active
+sessions. cly cannot tell whether a running session is idle or doing work; the
+warning covers interrupted responses and tools. Use a separate terminal, since
+reload refuses to stop its own process
+or ancestors. `--yes` accepts the warning explicitly for noninteractive use.
+`--force` allows SIGKILL after the Unix stop timeout; Windows termination is
+immediate even without that flag.
+
+Native history and terminal preflight must pass before any stop. A recovery
+snapshot and structured `reloads/*.json` receipt preserve the current tracked
+inventory and reload outcome. Unbound conversations in the recovery snapshot
+remain unresolved. Changes to the active inventory or process families abort the
+operation, and stop failures prevent reopening. Inspect a failed receipt before
+retrying a partial terminal launch. See the
+[reload workflow](workflows.md#reload-from-a-snapshot) for the full command and
+recovery boundaries.
+
 ## Transfer selected context
 
 ```sh
