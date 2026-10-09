@@ -411,7 +411,9 @@ cly_exec_program() {  # PROGRAM ARG...; also used by the managed supervisor
                 command -v "$argument" >/dev/null 2>&1 || { echo "cly: Windows batch launch requires $argument" >&2; return 1; }
             done
             program=$(cly_to_posix "$program")
-            [ -f "$program" ] && [ -r "$program" ] || { echo "cly: Windows batch file unavailable: $program" >&2; return 1; }
+            if [ ! -f "$program" ] || [ ! -r "$program" ]; then
+                echo "cly: Windows batch file unavailable: $program" >&2; return 1
+            fi
             CLY_BATCH_TARGET=$(cygpath -aw "$program") || return $?
             export CLY_BATCH_TARGET
             for argument in "$@"; do
@@ -425,6 +427,8 @@ cly_exec_program() {  # PROGRAM ARG...; also used by the managed supervisor
             # keeping CMD metacharacters quoted; no user text becomes PS code.
             # CMD has an 8191-character ceiling and line-based parsing. Refuse
             # those payloads; use a native executable or stdin for larger data.
+            # PowerShell variables stay literal; arguments arrive through env.
+            # shellcheck disable=SC2016
             powershell_code='
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"

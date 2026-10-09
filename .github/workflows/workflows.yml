@@ -20,19 +20,20 @@ jobs:
         run: python test-workflows.py
       - name: Document collection and filing command integration
         run: python test-document-pipeline.py
-      - name: Session discovery and name lookup
-        run: |
-          python test-session-discovery.py
-          python test-session-list.py
+      - name: Session discovery
+        run: python test-session-discovery.py
+      - name: Session name lookup
+        run: python test-session-list.py
       - name: Portable handoffs and capture health
         run: python test-handoffs-health.py
       - name: Snapshot reload safety and process shutdown
         run: python test-snapshot-reload.py
-      - name: Windows batch launch and managed console inheritance
+      - name: Windows batch launch
         if: runner.os == 'Windows'
-        run: |
-          python test-windows-batch.py
-          python test-snapshot-console.py
+        run: python test-windows-batch.py
+      - name: Windows managed console inheritance
+        if: runner.os == 'Windows'
+        run: python test-snapshot-console.py
       - name: Launcher checks
         if: runner.os == 'Linux'
         run: |
