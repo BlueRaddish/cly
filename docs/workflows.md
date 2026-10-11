@@ -26,8 +26,11 @@ cly snapshot restore 2026-10-07
 
 Snapshots contain sessions whose tracked processes are still alive. Process start
 identities guard against a recycled PID being mistaken for the original process.
-Sessions opened outside cly are excluded unless explicitly adopted; visible
-terminal tabs and Desktop conversations are not an automatic capture inventory.
+On Windows and Linux, snapshot discovery also adopts running interactive native
+clients that match a configured profile and store. Windows discovery reads their
+existing console buffers without input or focus changes. Shared app servers,
+headless jobs and subagent histories are excluded. Desktop conversations and
+arbitrary terminal tabs are not a capture inventory.
 Use `snapshot status` to review exactly what will be saved.
 The date selector is a **UTC date** and picks the latest snapshot that day. Use the
 full ID from `snapshot list` to select a specific saved inventory.
@@ -64,8 +67,9 @@ does not erase the restart inventory. `auto` selects this checkpoint separately
 from the ordinary dated snapshots. `--no-restore-on-login` starts capture at login
 without opening conversations.
 
-Automatic capture and `auto save` require exact native IDs and readable histories
-for every active tracked run. Unresolved or unreadable runs preserve the old
+Automatic capture and `auto save` require resolved native IDs and readable histories
+for every active run, or a verified pristine Codex welcome screen. Welcome screens
+reopen as new sessions with their saved launch settings. Unresolved or unreadable runs preserve the old
 checkpoint and appear as worker errors in status.
 
 At login after a new boot, automatic restore checks the same profiles,
@@ -83,10 +87,14 @@ automatic retries during that boot. Review status before manually retrying with
 inventory with the current nonempty, fully readable inventory and supersedes a
 failure or readiness hold.
 
-The checkpoint covers only tracked or explicitly adopted agent conversations.
+The checkpoint covers managed and automatically discovered agent conversations.
 It does not capture Terminal panes, window positions, split layouts, scrollback,
-shell state or arbitrary running tools. Resolve new conversation IDs through the
-supported hooks or explicit binding before relying on automatic restore.
+shell state or arbitrary running tools. Native resume arguments and lifecycle
+hooks establish identity directly. On Windows, unbound Codex/Claude clients can
+also be matched by unique long user and assistant prose in the console and native
+history, within the same working directory. This fallback cannot resolve hidden,
+short or identical fork histories; ambiguity blocks restore instead of guessing.
+`CLY_NATIVE_DISCOVERY=0` disables native process discovery for an isolated workflow.
 
 When replacing Windows Terminal's native saved-layout restore, back up its
 settings and set `firstWindowPreference` to `"defaultProfile"` separately to avoid
@@ -114,6 +122,11 @@ one native ID share that history; cly cannot distinguish their unrecorded settin
 Codex restores locally: old remote connection addresses/auth environment names
 are transport settings and are not replayed against a shared server whose existing
 session might have different permissions.
+
+Windows Terminal launches use `--reloadEnvironment` to obtain its normal terminal
+environment, rather than inheriting automation-only `NO_COLOR=1` or `TERM=dumb`
+from the snapshot command. cly's launch controls are passed explicitly. User and
+Terminal profile environment settings continue to govern color.
 
 Only known resume options and a small set of non-secret Codex config overrides
 are saved. Unsupported flag names appear in `resume_options.omitted_flags`; their

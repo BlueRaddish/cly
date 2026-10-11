@@ -9,9 +9,9 @@ import time
 
 
 TERMINALS = ("auto", "wt", "terminal", "tmux", "gnome-terminal", "konsole", "x-terminal-emulator")
-CONTROLS = ("CLY_CONFIG", "CLY_STATE_HOME", "CLY_LIBRARY_HOME", "CLY_PYTHON", "CLY_SHELL", "CLY_TRACK",
+CONTROLS = ("CLY_CONFIG", "CLY_STATE_HOME", "CLY_LIBRARY_HOME", "CLY_PYTHON", "CLY_SHELL", "CLY_TRACK", "CLY_NATIVE_DISCOVERY",
             "CLAUDE_CONFIG_DIR", "CODEX_HOME", "GEMINI_CLI_HOME", "KIMI_CODE_HOME", "QWEN_HOME", "CLY_MUSE_HOME", "CLY_OPENCODE_HOME")
-FIELDS = ("profile", "kind", "session_id", "directory", "native_root", "bypass", "resume_options", "binding", "bindings")
+FIELDS = ("profile", "kind", "session_id", "directory", "native_root", "bypass", "resume_options", "binding", "bindings", "restore_mode", "restore_key")
 
 
 def folder(w):
@@ -67,8 +67,9 @@ def tick(w, boot=None, explicit=False):
     with w.lock(w.state() / "reload.lock"), w.lock(folder(w) / "checkpoint.lock"):
         records = w.active()
         unresolved = [record.get("profile", "unknown") for record in records
-                      if record.get("kind") not in w.sessions.RESUME or not isinstance(record.get("session_id"), str)
-                      or not w.sessions.ID_RE.fullmatch(record["session_id"]) or record.get("history_present") is False]
+                      if not (record.get("kind") == "codex" and record.get("restore_mode") == "new" and record.get("binding") == "native-welcome")
+                      and (record.get("kind") not in w.sessions.RESUME or not isinstance(record.get("session_id"), str)
+                      or not w.sessions.ID_RE.fullmatch(record["session_id"]) or record.get("history_present") is False)]
         if unresolved:
             raise ValueError("Automatic checkpoint preserved: waiting for exact readable native sessions: " + ", ".join(unresolved))
         for record in records:
@@ -81,7 +82,7 @@ def tick(w, boot=None, explicit=False):
         manual_ready = False
         if hold.get("status") == "waiting" and hold.get("boot_id") == boot:
             expected = {json.dumps(item) for item in hold["expected"]}
-            live = {json.dumps(identity(w, record)) for record in records if record.get("session_id")}
+            live = {json.dumps(identity(w, record)) for record in records if record.get("session_id") or record.get("restore_mode") == "new"}
             if not explicit and not expected.issubset(live):
                 raise ValueError("Waiting for all manually restored conversations to become active; automatic checkpoint preserved")
             manual_ready = bool(records)
@@ -101,7 +102,7 @@ def tick(w, boot=None, explicit=False):
                 expected = ({json.dumps(item) for item in receipt["expected"]} if "expected" in receipt else
                             {json.dumps(identity(w, dict(record, directory=w.restored_directory(record, (), previous.get("host") != w.socket.gethostname()))))
                              for record in previous["sessions"]})
-                live = {json.dumps(identity(w, record)) for record in records if record.get("session_id")}
+                live = {json.dumps(identity(w, record)) for record in records if record.get("session_id") or record.get("restore_mode") == "new"}
                 if not expected.issubset(live):
                     raise ValueError("Waiting for all restored conversations to become active; earlier checkpoint preserved")
             if not pending and not manual_ready and previous["boot_id"] == boot and inventory(previous["sessions"]) == inventory(records):
@@ -129,7 +130,10 @@ def identity(w, record):
     directory = os.path.normcase(os.path.abspath(os.path.normpath(str(w.sessions.native_path(record["directory"])))))
     root = record.get("native_root")
     store = os.path.normcase(os.path.abspath(os.path.normpath(str(w.sessions.native_path(root))))) if root else ("profile", record.get("profile"))
-    return record.get("kind"), record.get("session_id"), store, directory
+    session = record.get("session_id")
+    if not session and record.get("restore_mode") == "new":
+        session = ("new", record.get("restore_key") or record.get("run_id"))
+    return record.get("kind"), session, store, directory
 
 
 def entry_key(w, record):
@@ -180,7 +184,7 @@ def restore_login(w, config, boot):
             resolved = w.restore_plan(value)
             unique = {entry_key(w, item): item for item in resolved}
             receipt["expected"] = [json.loads(value) for value in sorted({json.dumps(identity(w, item)) for item in unique.values()})]
-            live = {identity(w, record) for record in w.active() if record.get("session_id")}
+            live = {identity(w, record) for record in w.active() if record.get("session_id") or record.get("restore_mode") == "new"}
             launched = {item["key"] for item in receipt["entries"] if item.get("status") in ("launched", "already-active")}
             plan = []
             for key, item in unique.items():
@@ -201,7 +205,7 @@ def restore_login(w, config, boot):
                     raise ValueError("Automatic snapshot disabled during login restore; remaining conversations preserved")
                 key = entry_key(w, item)
                 # A snapshot can contain two profiles bound to one conversation.
-                if key in launched or identity(w, item) in {identity(w, record) for record in w.active() if record.get("session_id")}:
+                if key in launched or identity(w, item) in {identity(w, record) for record in w.active() if record.get("session_id") or record.get("restore_mode") == "new"}:
                     continue
                 entry = {"key": key, "profile": item["profile"], "kind": item["kind"], "session_id": item["session_id"],
                          "status": "attempting", "attempted": w.now()}

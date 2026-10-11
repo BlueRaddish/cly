@@ -149,15 +149,34 @@ def cly_command(arguments):
 def native_id(kind, arguments):
     flag = sessions.RESUME.get(kind)
     aliases = {"claude": "-r", "opencode": "-s", "gemini": "-r"}
-    for i, arg in enumerate(arguments):
-        if arg in {flag, aliases.get(kind), "--session-id"} and i + 1 < len(arguments):
-            candidate = arguments[i + 1]
-            if sessions.ID_RE.fullmatch(candidate):
-                return candidate
-        if arg.startswith("--session-id=") or flag and flag.startswith("--") and arg.startswith(flag + "="):
-            candidate = arg.split("=", 1)[1]
-            if sessions.ID_RE.fullmatch(candidate):
-                return candidate
+    values, switches = resume_options.option_sets(kind)
+    values |= {"--cd", "-C", "--remote", "--remote-auth-token-env"}
+    switches |= {"--last", "--all", "--include-non-interactive", "--continue", "--fork-session"}
+    positional, i = False, 0
+    while i < len(arguments):
+        arg = arguments[i]
+        i += 1
+        if arg == "--":
+            break
+        option, equals, value = arg.partition("=")
+        if option in {flag, aliases.get(kind), "--session-id"}:
+            if not option.startswith("-"):
+                positional = True
+                continue
+            if not equals and i < len(arguments):
+                value = arguments[i]
+                i += 1
+            return value if sessions.ID_RE.fullmatch(value) else None
+        if option in values:
+            i += int(not equals and i < len(arguments))
+        elif arg in switches:
+            continue
+        elif arg.startswith("-"):
+            # Unknown options may take a value. Never mistake it for an ID.
+            if not equals and i < len(arguments) and not arguments[i].startswith("-"):
+                i += 1
+        elif positional:
+            return arg if sessions.ID_RE.fullmatch(arg) else None
     return None
 
 
@@ -169,6 +188,8 @@ def catalog(record):
 
 def resolve(record):
     import tracking
+    import runtime
+    runtime.apply(record, state())
     tracking.apply(record, state())
     items, errors = catalog(record)
     by_id = {item["session_id"]: item for item in items}
@@ -195,7 +216,8 @@ def active():
             raise ValueError("Invalid run registry: " + str(path))
         if alive(record):
             result.append(resolve(record))
-    return result
+    import runtime
+    return runtime.capture(result)
 
 
 def supervise(args):
@@ -219,6 +241,8 @@ def supervise(args):
               "directory": str(Path.cwd()), "bypass": resume_options.bypass(kind, options), "resume_options": options, "started": now(),
               "pid": os.getpid(), "birth": birth(os.getpid()), "session_id": sid,
               "native_root": str(sessions.root(kind)) if kind in sessions.KINDS else "", "tracking": lifecycle}
+    if os.environ.get("CLY_SNAPSHOT_ENTRY"):
+        record["restore_key"] = safe_component(os.environ["CLY_SNAPSHOT_ENTRY"], "snapshot entry")
     items, _ = catalog(record)
     record["baseline"] = [item["session_id"] for item in items]
     path = state() / "runs" / (run_id + ".json")
@@ -261,7 +285,7 @@ def safe_component(value, label):
 def snapshot_value(records=None):
     records = [dict(record) for record in (active() if records is None else records)]
     if not records:
-        raise ValueError("No active tracked sessions. Launch through cly, or use snapshot adopt for an existing process.")
+        raise ValueError("No active supported terminal sessions found.")
     sid = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ-") + uuid.uuid4().hex[:8]
     for record in records:
         record.pop("baseline", None)
@@ -342,12 +366,13 @@ def restore_plan(snapshot, mappings=(), skip_unresolved=False, query=True):
             raise ValueError("Invalid snapshot session record")
         profile = safe_component(record.get("profile"), "profile")
         kind, sid = record.get("kind"), record.get("session_id")
-        if kind not in sessions.RESUME or not sid:
+        fresh = record.get("restore_mode") == "new" and kind == "codex" and not sid and record.get("binding") == "native-welcome"
+        if kind not in sessions.RESUME or not sid and not fresh:
             if skip_unresolved:
                 continue
-            failures.append(profile + ": unresolved native session; bind its run ID before saving a new snapshot")
+            failures.append(profile + ": unresolved native session; automatic discovery has insufficient unambiguous evidence")
             continue
-        if not sessions.ID_RE.fullmatch(sid):
+        if not fresh and not sessions.ID_RE.fullmatch(sid):
             raise ValueError("Invalid native session ID")
         directory = restored_directory(record, mappings, snapshot.get("host") != socket.gethostname())
         if not Path(directory).is_dir():
@@ -362,8 +387,11 @@ def restore_plan(snapshot, mappings=(), skip_unresolved=False, query=True):
             if options.get("origin") == "legacy" and profile not in warned:
                 print("cly: original launch flags are unavailable for " + profile + "; replaying recovered native settings", file=sys.stderr)
                 warned.add(profile)
-            arguments = ["--cly-snapshot-resume", "--dir", directory, profile, sessions.RESUME[kind], sid, *options["args"]]
+            arguments = ["--cly-snapshot-resume", "--dir", directory, profile] + ([] if fresh else [sessions.RESUME[kind], sid]) + options["args"]
         else:
+            if fresh:
+                failures.append(profile + ": new terminal has no saved launch options")
+                continue
             if profile not in warned:
                 print("cly: legacy snapshot has no saved launch options for " + profile + "; using its current profile", file=sys.stderr)
                 warned.add(profile)
@@ -378,7 +406,9 @@ def restore_plan(snapshot, mappings=(), skip_unresolved=False, query=True):
             store = parts[2]
         else:
             store = record.get("native_root")
-        if kind in sessions.KINDS:
+        if fresh:
+            pass  # A verified pristine welcome screen has no history to resume.
+        elif kind in sessions.KINDS:
             items, errors = sessions.discover(kind, store, with_messages=False)
             if sid not in {item["session_id"] for item in items}:
                 failures.append(profile + ": native history missing/unreadable for " + sid + (": " + "; ".join(errors) if errors else ""))
@@ -393,6 +423,8 @@ def restore_plan(snapshot, mappings=(), skip_unresolved=False, query=True):
                 "argv": cly_command(arguments)}
         if options is not None:
             item["resume_options"] = options
+        if fresh:
+            item.update(restore_mode="new", restore_key=safe_component(record.get("restore_key") or record.get("run_id"), "snapshot entry"))
         plan.append(item)
     if failures:
         raise ValueError("Restore preflight failed; nothing opened:\n" + "\n".join(failures))
@@ -411,7 +443,7 @@ def terminal_commands(plan, terminal):
     group = "cly-" + uuid.uuid4().hex[:8]
     # Terminal servers may keep an older environment. Carry only cly's launch
     # controls from this restore invocation, never arbitrary profile secrets.
-    controls = ("CLY_CONFIG", "CLY_STATE_HOME", "CLY_LIBRARY_HOME", "CLY_PYTHON", "CLY_SHELL", "CLY_TRACK")
+    controls = ("CLY_CONFIG", "CLY_STATE_HOME", "CLY_LIBRARY_HOME", "CLY_PYTHON", "CLY_SHELL", "CLY_TRACK", "CLY_NATIVE_DISCOVERY")
     environment = {name: os.environ[name] for name in controls if name in os.environ}
     for i, item in enumerate(plan):
         argv, cwd = item["argv"], item["directory"]
@@ -420,6 +452,7 @@ def terminal_commands(plan, terminal):
             # and arguments as literal data through Windows Terminal's parser.
             quote = lambda s: "'" + s.replace("'", "''") + "'"
             script = "".join("$env:" + name + "=" + (quote(environment[name]) if name in environment else "$null") + "; " for name in controls)
+            script += "$env:CLY_SNAPSHOT_ENTRY=" + (quote(item["restore_key"]) if item.get("restore_key") else "$null") + "; "
             script += "& " + quote(argv[0]) + " " + " ".join(quote(a) for a in argv[1:])
             # A commandline tab otherwise inherits the caller's environment,
             # including automation-only NO_COLOR/TERM=dumb. Let Terminal build
@@ -427,6 +460,7 @@ def terminal_commands(plan, terminal):
             commands.append(["wt", "-w", group, "new-tab", "--reloadEnvironment", "-d", cwd, "powershell.exe", "-NoProfile", "-EncodedCommand", base64.b64encode(script.encode("utf-16le")).decode()])
             continue
         exports = "; ".join("export " + name + "=" + shlex.quote(environment[name]) if name in environment else "unset " + name for name in controls)
+        exports += "; " + ("export CLY_SNAPSHOT_ENTRY=" + shlex.quote(item["restore_key"]) if item.get("restore_key") else "unset CLY_SNAPSHOT_ENTRY")
         argv = [bash(), "-c", exports + '; exec "$@"', "cly-restore", *argv]
         if terminal == "terminal":
             shell_command = "cd " + shlex.quote(cwd) + " && " + shlex.join(argv)
@@ -567,7 +601,8 @@ def snapshot_command(args):
     elif args.action == "save":
         value = save_snapshot()
         print(value["snapshot_id"])
-        print(f"{len(value['sessions'])} active tracked sessions saved; " + str(sum(not r.get("session_id") for r in value["sessions"])) + " need native-ID binding")
+        unresolved = sum(not r.get("session_id") and r.get("restore_mode") != "new" for r in value["sessions"])
+        print(f"{len(value['sessions'])} active terminal sessions saved; {unresolved} unresolved")
     elif args.action == "list":
         for value in snapshots():
             print(value["snapshot_id"], len(value["sessions"]), "sessions", value["host"])
@@ -589,6 +624,7 @@ def snapshot_command(args):
             record["binding"] = "user"
             atomic(path, record)
             (state() / "tracking" / (args.run_id + ".json")).unlink(missing_ok=True)
+            (state() / "runtime" / (args.run_id + ".json")).unlink(missing_ok=True)
         print("Bound", args.run_id, "to", args.session_id)
     elif args.action == "adopt":
         safe_component(args.profile, "profile")
@@ -1633,7 +1669,7 @@ def parser():
     for name in ("profile", "kind", "bypass"):
         run.add_argument("--" + name, required=True)
     run.add_argument("command", nargs=argparse.REMAINDER)
-    snapshot = groups.add_parser("snapshot", help="Save and restore active managed sessions")
+    snapshot = groups.add_parser("snapshot", help="Discover, save and restore active terminal sessions")
     commands = snapshot.add_subparsers(dest="action", required=True)
     import snapshot_auto
     snapshot_auto.add_parser(commands)

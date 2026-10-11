@@ -29,13 +29,13 @@ def prepare(kind, command, run_id, state_root):
 
     Codex hooks require review in /hooks; its shared daemon also cannot inherit
     a TUI client's CLY_RUN_ID. Export hook_config for an explicitly configured
-    local runtime; report the boundary instead of guessing daemon associations.
+    local runtime; native client discovery independently covers this boundary.
     """
     import workflows as w
     environment = dict(os.environ, CLY_RUN_ID=run_id, CLY_STATE_HOME=str(state_root))
     if kind != "claude":
         return command, environment, {"mode": "hooks-available" if kind == "codex" else "manual",
-                                      "reason": "Install and trust lifecycle hooks in a runtime inheriting CLY_RUN_ID" if kind == "codex" else "No supported lifecycle hook integration"}
+                                      "reason": "Native client discovery enabled; optional trusted lifecycle hooks need a runtime inheriting CLY_RUN_ID" if kind == "codex" else "Native resume arguments; no supported lifecycle hook integration"}
     if any(arg == "--settings" or arg.startswith("--settings=") for arg in command):
         return command, environment, {"mode": "hooks-available", "reason": "Explicit --settings preserved; merge exported lifecycle hooks"}
     path = state_root / "tracking" / "settings" / (run_id + ".json")

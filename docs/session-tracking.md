@@ -79,13 +79,23 @@ startup, resume, clear and compact update the run's native ID through a separate
 lifecycle journal. The receiver excludes subagent events, validates transcript
 identity/store containment when supplied, and stores no prompt text.
 
-Codex hook configuration can be exported, but the native hook must be installed
+Snapshot discovery automatically adopts matching interactive native clients on
+Windows/Linux. Explicit native resume arguments bind without manual IDs, including
+Muse's `resume --yolo ID` order. Windows unbound Codex/Claude clients use a unique
+match of long user and assistant prose from their existing console and same-directory
+native history. No keyboard input, clipboard access or terminal activation is used.
+Short, hidden or identical fork histories remain unresolved; newest-file timing is
+never used to choose an ID. Pristine Codex welcome screens are saved as new-session
+entries and restored with their launch settings. Screen text is not persisted in
+the registry or binding journal.
+
+Codex hook configuration can still be exported, but the native hook must be installed
 and trusted through Codex's supported hook controls. The runtime executing the
 hook must inherit `CLY_RUN_ID` and cly's state environment. A shared Desktop/app
 server does not necessarily inherit the launching terminal's run identity, so
-cly reports hooks as available and keeps manual binding for that boundary.
+cly reports hooks as available and uses native-client discovery at that boundary.
 Explicit resume IDs and ordinary new Claude IDs remain supported independently.
-The exact hook association is never inferred from the newest file or timing.
+`snapshot bind` remains an optional escape hatch for unsupported/ambiguous clients.
 
 ## Reload saved sessions
 

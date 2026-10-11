@@ -38,6 +38,8 @@ jobs:
       - name: Windows managed console inheritance
         if: runner.os == 'Windows'
         run: python test-snapshot-console.py
+      - name: Native snapshot discovery
+        run: python test-snapshot-runtime.py
       - name: Launcher checks
         if: runner.os == 'Linux'
         run: |

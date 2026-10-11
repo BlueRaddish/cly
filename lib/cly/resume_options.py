@@ -77,7 +77,7 @@ def capture(kind, arguments):
         elif token in switches:
             result.append(token)
             permission |= token in PERMISSION_FLAGS or token == BYPASS.get(kind) or token == "-y"
-        elif flag in {sessions.RESUME.get(kind), "--session-id", "--resume", "-r"} or kind == "codex" and flag in {"--remote", "--remote-auth-token-env"}:
+        elif flag in {sessions.RESUME.get(kind), "--session-id", "--resume", "-r"} or kind == "codex" and flag in {"--remote", "--remote-auth-token-env", "--cd", "-C"}:
             # Session identity is stored separately. Remote connections are
             # transport, not a permission override; restore Codex locally.
             if not equals and i < len(arguments) and not arguments[i].startswith("-"):

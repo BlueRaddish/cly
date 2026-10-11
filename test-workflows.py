@@ -136,6 +136,11 @@ with tempfile.TemporaryDirectory(prefix="cly-workflows-") as temporary:
         check(w.native_id("claude", ["-r", "claude-one"]) == "claude-one")
         check(w.native_id("opencode", ["-s", "ses_one"]) == "ses_one")
         check(w.native_id("claude", ["--session-id=claude-one"]) == "claude-one")
+        check(w.native_id("muse", ["resume", "--yolo", "muse-one"]) == "muse-one")
+        check(w.native_id("codex", ["resume", "--model", "model-name", "codex-one"]) == "codex-one")
+        check(w.native_id("codex", ["--model", "resume", "unrelated-prompt"]) is None)
+        check(w.native_id("codex", ["resume", "--last"]) is None)
+        check(w.native_id("codex", ["--", "resume", "literal-prompt"]) is None)
         fails(lambda: w.restored_directory(dict(record, home_relative="D:escape"), [], True), "Invalid")
         malformed_snapshot = json.loads(json.dumps(saved))
         malformed_snapshot["sessions"][0]["bypass"] = "false"
@@ -273,6 +278,11 @@ with tempfile.TemporaryDirectory(prefix="cly-workflows-") as temporary:
             encoded = w.terminal_commands(w.restore_plan(saved, query=False), "wt")[0][-1]
             import base64
             check("codex-one" in base64.b64decode(encoded).decode("utf-16le"))
+            with patch.dict(os.environ, {"NO_COLOR": "1", "TERM": "dumb", "CLY_CONFIG": "literal-config"}):
+                command = w.terminal_commands(w.restore_plan(saved, query=False), "wt")[0]
+                check("--reloadEnvironment" in command)
+                script = base64.b64decode(command[-1]).decode("utf-16le")
+                check("literal-config" in script and "NO_COLOR" not in script and "TERM" not in script)
 
         # Restore preview must check the terminal too, without launching it.
         with patch.object(w, "select_snapshot", return_value=saved), \
