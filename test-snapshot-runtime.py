@@ -98,6 +98,9 @@ def unit():
                 value = w.snapshot_value(r.capture([fresh]))
                 plan = w.restore_plan(value, query=False)
                 assert len(plan) == 1 and plan[0]["restore_mode"] == "new"
+                assert w.is_new_session(value["sessions"][0])
+                assert not w.is_new_session(dict(value["sessions"][0], session_id="one"))
+                assert not w.is_new_session(dict(value["sessions"][0], binding=None))
                 assert "resume" not in plan[0]["argv"] and plan[0]["restore_key"] == "welcome"
                 assert a.identity(w, value["sessions"][0]) == a.identity(w, plan[0])
                 assert a.identity(w, dict(value["sessions"][0], run_id="different")) != a.identity(w, value["sessions"][0])

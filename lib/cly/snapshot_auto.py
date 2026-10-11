@@ -67,7 +67,7 @@ def tick(w, boot=None, explicit=False):
     with w.lock(w.state() / "reload.lock"), w.lock(folder(w) / "checkpoint.lock"):
         records = w.active()
         unresolved = [record.get("profile", "unknown") for record in records
-                      if not (record.get("kind") == "codex" and record.get("restore_mode") == "new" and record.get("binding") == "native-welcome")
+                      if not w.is_new_session(record)
                       and (record.get("kind") not in w.sessions.RESUME or not isinstance(record.get("session_id"), str)
                       or not w.sessions.ID_RE.fullmatch(record["session_id"]) or record.get("history_present") is False)]
         if unresolved:

@@ -358,6 +358,11 @@ def restored_directory(record, mappings, different_host):
     return str(sessions.native_path(original))
 
 
+def is_new_session(record):
+    return (record.get("kind") == "codex" and record.get("restore_mode") == "new"
+            and not record.get("session_id") and record.get("binding") == "native-welcome")
+
+
 def restore_plan(snapshot, mappings=(), skip_unresolved=False, query=True):
     plan, failures = [], []
     warned = set()
@@ -366,7 +371,7 @@ def restore_plan(snapshot, mappings=(), skip_unresolved=False, query=True):
             raise ValueError("Invalid snapshot session record")
         profile = safe_component(record.get("profile"), "profile")
         kind, sid = record.get("kind"), record.get("session_id")
-        fresh = record.get("restore_mode") == "new" and kind == "codex" and not sid and record.get("binding") == "native-welcome"
+        fresh = is_new_session(record)
         if kind not in sessions.RESUME or not sid and not fresh:
             if skip_unresolved:
                 continue
@@ -522,7 +527,7 @@ def reload_snapshot(args):
             print("cly cannot reliably detect busy turns or save unsaved application state.", file=sys.stderr)
             if os.name == "nt":
                 print("Windows uses immediate process termination after confirmation.", file=sys.stderr)
-            if any(not record.get("session_id") for record in records):
+            if any(not record.get("session_id") and not is_new_session(record) for record in records):
                 print("Some running sessions lack native IDs; their recovery inventory cannot automatically resume them.", file=sys.stderr)
             if not args.yes:
                 if not sys.stdin.isatty():
@@ -601,7 +606,7 @@ def snapshot_command(args):
     elif args.action == "save":
         value = save_snapshot()
         print(value["snapshot_id"])
-        unresolved = sum(not r.get("session_id") and r.get("restore_mode") != "new" for r in value["sessions"])
+        unresolved = sum(not r.get("session_id") and not is_new_session(r) for r in value["sessions"])
         print(f"{len(value['sessions'])} active terminal sessions saved; {unresolved} unresolved")
     elif args.action == "list":
         for value in snapshots():
