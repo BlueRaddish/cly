@@ -421,7 +421,10 @@ def terminal_commands(plan, terminal):
             quote = lambda s: "'" + s.replace("'", "''") + "'"
             script = "".join("$env:" + name + "=" + (quote(environment[name]) if name in environment else "$null") + "; " for name in controls)
             script += "& " + quote(argv[0]) + " " + " ".join(quote(a) for a in argv[1:])
-            commands.append(["wt", "-w", group, "new-tab", "-d", cwd, "powershell.exe", "-NoProfile", "-EncodedCommand", base64.b64encode(script.encode("utf-16le")).decode()])
+            # A commandline tab otherwise inherits the caller's environment,
+            # including automation-only NO_COLOR/TERM=dumb. Let Terminal build
+            # its normal environment; the script carries cly controls explicitly.
+            commands.append(["wt", "-w", group, "new-tab", "--reloadEnvironment", "-d", cwd, "powershell.exe", "-NoProfile", "-EncodedCommand", base64.b64encode(script.encode("utf-16le")).decode()])
             continue
         exports = "; ".join("export " + name + "=" + shlex.quote(environment[name]) if name in environment else "unset " + name for name in controls)
         argv = [bash(), "-c", exports + '; exec "$@"', "cly-restore", *argv]
