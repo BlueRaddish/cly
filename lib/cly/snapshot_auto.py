@@ -127,9 +127,9 @@ def tick(w, boot=None, explicit=False):
 
 
 def identity(w, record):
-    directory = os.path.normcase(os.path.abspath(os.path.normpath(str(w.sessions.native_path(record["directory"])))))
+    directory = os.path.normcase(str(w.sessions.native_path(record["directory"]).resolve()))
     root = record.get("native_root")
-    store = os.path.normcase(os.path.abspath(os.path.normpath(str(w.sessions.native_path(root))))) if root else ("profile", record.get("profile"))
+    store = os.path.normcase(str(w.sessions.native_path(root).resolve())) if root else ("profile", record.get("profile"))
     session = record.get("session_id")
     if not session and record.get("restore_mode") == "new":
         session = ("new", record.get("restore_key") or record.get("run_id"))

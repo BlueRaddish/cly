@@ -156,6 +156,25 @@ with tempfile.TemporaryDirectory(prefix="cly-auto-test-") as temporary:
         legacy = dict(record, native_root=None)
         check(a.identity(w, legacy) != a.identity(w, dict(legacy, profile="alias")))
 
+    # macOS /var and /private/var (and Windows junctions) name the same store.
+    real, alias = temp / "real-path", temp / "aliased-path"
+    real.mkdir()
+    if os.name == "nt":
+        subprocess.run(["cmd.exe", "/c", "mklink", "/J", str(alias), str(real)],
+                       capture_output=True, check=True, **w.hidden())
+    else:
+        alias.symlink_to(real, target_is_directory=True)
+    aliased = dict(record, directory=str(alias), native_root=str(alias / "store"))
+    resolved = dict(aliased, directory=str(real), native_root=str(real / "store"))
+    with case("aliased-native-path"), patch.object(w, "active", return_value=[aliased]), \
+            patch.object(w, "restore_plan", return_value=[resolved]), patch.object(w, "launch_terminal", create=True) as launch:
+        checkpoint(records=[aliased])
+        check(a.identity(w, aliased) == a.identity(w, resolved))
+        check(a.entry_key(w, aliased) == a.entry_key(w, resolved))
+        result = a.restore_login(w, config, "now")
+        check(result["entries"][0]["status"] == "already-active" and not launch.called)
+        check(a.tick(w, "now")["changed"])
+
     with case("relocated-native-store"), patch.object(w, "terminal_commands", side_effect=terminals), patch.object(w, "launch_terminal", create=True) as launch:
         old_records = [record, dict(record, profile="alias", native_root=str(temp / "old-other-root"))]
         checkpoint(records=old_records)
