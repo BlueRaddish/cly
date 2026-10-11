@@ -281,9 +281,7 @@ def capture(records):
         parent, seen, owner = row["pid"], set(), None
         while parent and parent not in seen:
             seen.add(parent)
-            owner = roots.get(parent)
-            if owner:
-                break
+            owner = owner or roots.get(parent)
             parent = table[parent].parent if parent in table else 0
         # A Node launcher and its native executable share one terminal. The
         # leaf client has the authoritative final argv; never create two entries.
@@ -293,6 +291,30 @@ def capture(records):
             continue
         kind, arguments = client(row["argv"])
         environment = row["environment"]
+        run_id = environment.get("CLY_RUN_ID")
+        # Terminal launch is asynchronous: a supervisor can publish its run
+        # after active() globbed the registry but before the native probe. Read
+        # its inherited identity again and verify the live ancestor association.
+        if run_id and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}", run_id):
+            managed = w.read(w.state() / "runs" / (run_id + ".json"))
+            if (managed and managed.get("schema") == w.SCHEMA and managed.get("kind") == kind
+                    and not managed.get("adopted") and w.alive(managed)
+                    and any(managed.get(key) in seen for key in ("pid", "child_pid"))):
+                if owner and owner.get("adopted") and owner.get("pid") == row["pid"] and owner.get("birth") == row["birth"]:
+                    # Reconcile only our automatically created duplicate for this
+                    # exact client; explicit user adoption records are preserved.
+                    records.remove(owner)
+                    roots = {pid: record for pid, record in roots.items() if record is not owner}
+                    w.safe_component(owner["run_id"], "run ID")
+                    (w.state() / "runs" / (owner["run_id"] + ".json")).unlink(missing_ok=True)
+                    (w.state() / "runtime" / (owner["run_id"] + ".json")).unlink(missing_ok=True)
+                owner = next((record for record in records if record["run_id"] == run_id), None)
+                if owner is None:
+                    owner = w.resolve(managed)
+                    records.append(owner)
+                for key in ("pid", "child_pid"):
+                    if key in owner:
+                        roots[owner[key]] = owner
         if owner is None:
             native_state = environment.get("CLY_STATE_HOME")
             if native_state and canonical(native_state) != canonical(w.state()):

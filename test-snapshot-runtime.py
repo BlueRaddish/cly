@@ -74,6 +74,20 @@ def unit():
             table[44000] = w.processes.ProcessIdentity(44000, "wrapper-start", 1)
             with patch.object(r.subprocess, "run", return_value=SimpleNamespace(stdout=json.dumps([wrapper, row]))):
                 assert len(r.capture([])) == 1
+            # A managed registry may appear between active()'s glob and probe.
+            # It must win over adoption, including a duplicate from that race.
+            late = dict(adopted[0], run_id="late-managed", pid=44000, birth="wrapper-start", adopted=False,
+                        child_pid=44001, child_birth="native-start")
+            w.atomic(state / "runs/late-managed.json", late)
+            inherited = dict(row, environment=dict(row["environment"], CLY_RUN_ID="late-managed"))
+            with patch.object(r.subprocess, "run", return_value=SimpleNamespace(stdout=json.dumps([inherited]))):
+                late_capture = r.capture([])
+                assert len(late_capture) == 1 and late_capture[0]["run_id"] == "late-managed"
+                assert not late_capture[0].get("adopted")
+                reconciled = r.capture([dict(adopted[0])])
+                assert len(reconciled) == 1 and reconciled[0]["run_id"] == "late-managed"
+                assert not (state / "runs" / (adopted[0]["run_id"] + ".json")).exists()
+            (state / "runs/late-managed.json").unlink()
             managed = dict(adopted[0], session_id=None, binding=None, run_id="managed", adopted=False)
             unbound = dict(row, argv=["codex.exe"])
             with patch.object(r.subprocess, "run", return_value=SimpleNamespace(stdout=json.dumps([unbound]))):
