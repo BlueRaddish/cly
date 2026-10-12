@@ -177,6 +177,21 @@ def _descendant(parent, child):
     return started(child.birth) >= started(parent.birth)
 
 
+def _shared_daemon(item):
+    # Windows Codex's managed daemon can remain a frontend descendant while
+    # serving other sessions. Other platforms need their native daemon metadata.
+    if os.name != "nt":
+        return False
+    try:
+        from runtime import windows_details
+        argv = windows_details(item.pid)["argv"]
+        return (len(argv) > 2 and re.split(r"[/\\]", argv[0])[-1].lower() == "codex.exe"
+                and argv[1] == "app-server" and "--managed-daemon" in argv[2:]
+                and birth_matches(birth(item.pid), item.birth))
+    except (OSError, ValueError):
+        return False
+
+
 def _family(roots, table):
     children = {}
     for item in table.values():
@@ -187,6 +202,8 @@ def _family(roots, table):
         parent = pending.pop()
         for child in children.get(parent.pid, ()):
             if child.pid in selected:
+                continue
+            if _shared_daemon(child):
                 continue
             if not child.birth:
                 raise ValueError("Cannot verify descendant process " + str(child.pid))
