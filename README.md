@@ -53,7 +53,7 @@ For example, on macOS (installed tools depend on your machine):
 
 ```console
 $ cly
-cly 4.3.0 — which agent?
+cly 4.6.0 — which agent?
 
     1  claude    Claude Code  installed, no profile yet
     2  codex     Codex        installed, no profile yet
@@ -127,7 +127,7 @@ Options go **before** the profile name. Exit status is `0` when the agent was la
 
 ```console
 $ cly -r
-cly 4.3.0 — which session?                                                      1/30
+cly 4.6.0 — which session?                                                      1/30
 up/down move · type to filter · Enter resume · Esc quit · 30 of 76 · CLY_ROWS=60 shows more
     #  agent     last      where                       title
     1  claude    2m ago    ~/claude                    Upgrade cly into a funnel for multiple agents
@@ -293,6 +293,12 @@ Your shell's own working directory is untouched: `cly` is a script, so the `cd` 
 ```sh
 ./test.sh
 ```
+
+The full workflow and native launch checks are the Python commands in
+[the CI workflow](.github/workflows/workflows.yml), including
+`python test-shared-daemon.py`. Run the shell checks with Bash 4.2 or newer;
+Git for Windows supplies it on Windows. Each launcher fixture owns its flags
+and state, so inherited session overrides cannot change the expected result.
 
 No agent is launched — `CLY_BIN` points at a stub that prints its working directory, its arguments and the environment it was given, which is the whole of what `cly` decides — and `CLY_CONFIG` and the four store variables point into a scratch directory, so the real config and the real session stores are unreachable from the suite. The stores it builds are shaped as the agents write theirs. A dropping check count means a check stopped running, not that it started passing.
 

@@ -8,6 +8,10 @@
 
 set -u
 
+# Each fixture owns its flags and state, even inside a managed cly session.
+unset CLY_FLAGS CLY_DOCUMENT_JOB
+export CLY_TRACK=0
+
 self_dir=$(cd "$(dirname "$0")" && pwd)
 cly="$self_dir/bin/cly"
 
@@ -15,6 +19,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 export CLY_CONFIG="$work/config"
+export CLY_STATE_HOME="$work/state"
 # Exercise the dependency-free fallback; test-session-list.py covers the
 # default profile-aware Python inventory and the normal launcher boundary.
 export CLY_SESSION_READER=bash
