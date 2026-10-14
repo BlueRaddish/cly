@@ -1143,7 +1143,7 @@ cp "$stub" "$work/bin/muse"
 rm "$work/bin/muse.cmd"
 
 # Defaults are written by init, but explicit existing flags remain authoritative.
-for spec in gemini:--yolo kimi:--auto qwen:--yolo opencode:--auto; do
+for spec in gemini:--yolo muse:--yolo kimi:--auto qwen:--yolo opencode:--auto; do
     tool=${spec%%:*}; flag=${spec#*:}
     cp "$stub" "$work/bin/$tool"
     reset_config
@@ -1245,6 +1245,24 @@ eq 'Antigravity setup succeeds' 0 "$rc"
 has 'Antigravity setup selects the official executable' 'profile.antigrav.bin=agy' "$(config)"
 has 'Antigravity setup saves its kind' 'profile.antigrav.kind=antigrav' "$(config)"
 has 'Antigravity setup pins the requested directory' "profile.antigrav.dir=$other" "$(config)"
+has 'Antigravity init offers remote and bypass defaults' '[--remote-control --dangerously-skip-permissions] >' "$out"
+has 'Antigravity init saves remote and bypass defaults' 'profile.antigrav.flags=--remote-control --dangerously-skip-permissions' "$(config)"
+out=$(run -x antigrav --conversation test-session)
+eq 'Antigravity remote flag is passed once' 1 "$(printf '%s\n' "$out" | grep -c '^ARG=--remote-control$')"
+eq 'Antigravity bypass is passed once' 1 "$(printf '%s\n' "$out" | grep -c '^ARG=--dangerously-skip-permissions$')"
+has 'Antigravity forwards native resume with defaults' $'ARG=--conversation\nARG=test-session' "$out"
+out=$(CLY_FLAGS='' run antigrav)
+hasnt 'Antigravity empty override disables remote' 'ARG=--remote-control' "$out"
+hasnt 'Antigravity empty override disables bypass' 'ARG=--dangerously-skip-permissions' "$out"
+out=$(ask $'\nnone\n\n' init antigrav)
+has 'Antigravity init none clears standing flags' 'profile.antigrav.flags=' "$(config)"
+out=$(ask $'\n\n\n' init antigrav)
+out=$(run antigrav)
+hasnt 'Antigravity init preserves explicit empty remote' 'ARG=--remote-control' "$out"
+hasnt 'Antigravity init preserves explicit empty bypass' 'ARG=--dangerously-skip-permissions' "$out"
+write_config 'profile.antigrav.bin=agy' 'profile.antigrav.kind=antigrav' 'profile.antigrav.flags=--effort high'
+out=$(ask $'\n\n\n' init antigrav)
+has 'Antigravity init preserves custom flags' 'profile.antigrav.flags=--effort high' "$(config)"
 
 # --- report -------------------------------------------------------------------
 

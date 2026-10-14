@@ -298,22 +298,25 @@ No agent is launched — `CLY_BIN` points at a stub that prints its working dire
 
 ## Remote control and permission defaults
 
-New catalog profiles default to their supported permission-bypass or auto-approval mode. Claude and Codex also default to remote control. `cly init` displays these flags before saving; enter `none` to disable both, or supply your own flags. Existing profiles keep their explicit flags. `-x` remains available for other profiles and does not duplicate an existing bypass flag.
+New catalog profiles default to their supported permission-bypass or auto-approval mode. Claude, Codex and Antigravity also default to remote control. `cly init` displays these flags before saving; enter `none` to disable both, or supply your own flags. Existing profiles keep their explicit flags. `-x` remains available for other profiles and does not duplicate an existing bypass flag.
 
 Claude receives `--remote-control --dangerously-skip-permissions`. For Codex, the standing `--remote-control` marker tells cly to run `codex remote-control start`, then connect the terminal using `--remote unix://` with `--dangerously-bypass-approvals-and-sandbox`. Startup failure stops the launch. This requires a Codex version supporting these commands. When resuming a remote Codex session (`cly --resume`, `cly --continue`, or `cly codex resume`), cly omits its standing bypass flag and any bypass requested with `-x` or the picker’s `x` key: Codex requires remote resumes to retain the session’s existing permissions. Remote control stays enabled, and new sessions still receive the bypass default. Explicit native arguments after the profile name remain unchanged. Arguments after the profile name remain native agent arguments; put the Codex marker in `profile.NAME.flags`, not after the profile name.
 
-Defaults checked on 2026-09-21:
+Catalog defaults (Antigravity and Muse rechecked against installed CLI help on 2026-10-14; other entries checked on 2026-09-21):
 
 | Entry | Standing defaults | Remote access |
 |---|---|---|
 | Claude | `--remote-control --dangerously-skip-permissions` | Same terminal session |
 | Codex | `--remote-control --dangerously-bypass-approvals-and-sandbox` | Daemon + connected terminal, as above |
+| Antigravity (`agy`) | `--remote-control --dangerously-skip-permissions` | Same terminal session |
 | Gemini | `--yolo` | No verified remote-control startup flag |
 | Muse | `--yolo` | No remote-control flag in installed CLI help |
 | Kimi | `--auto` | Use `/remote-control` within the session; `kimi rc` is a separate foreground mode |
 | Qwen | `--yolo` | No verified remote-control startup flag |
 | OpenCode | `--auto` | Native server/attach workflow; no cloud relay enabled by cly |
 | DeepSeek / Llama | Ollama launch prefix, then `--dangerously-skip-permissions` | Claude remote control does not support custom API endpoints |
+
+[Antigravity remote control](https://antigravity.google/docs/remote-control/#launch-directly-with-remote-control---remote-control) uses its native `--remote-control` flag; cly forwards it to `agy` without starting a separate daemon. Muse keeps `--yolo`; its installed CLI has no remote-control flag.
 
 [Kimi’s current CLI reference](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-command) distinguishes `--auto` (Never Ask) from `--yolo` (Ask When Needed). `cly -x kimi` replaces a saved YOLO flag for that launch; the config is preserved. [Kimi remote control](https://www.kimi.com/code/docs/en/kimi-code-cli/guides/remote-control.html) is a separate foreground mode or an in-session command, so cly does not silently replace the terminal with a web server.
 

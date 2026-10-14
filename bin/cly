@@ -533,7 +533,7 @@ cly_catalog_info() {  # NAME → the six above; 1 if not in the catalog
                   cat_login='claude, then /login' ;;
         codex)    cat_label='Codex'; cat_bin=codex; cat_flags=$CLY_CODEX_FLAGS
                   cat_login='codex login' ;;
-        antigrav) cat_label='Antigravity'; cat_bin=agy
+        antigrav) cat_label='Antigravity'; cat_bin=agy; cat_flags='--remote-control --dangerously-skip-permissions'
                   cat_login='agy, then follow the sign-in prompts' ;;
         # Kept for explicitly named legacy profiles, outside the new-agent menu.
         gemini)   cat_label='Gemini CLI'; cat_bin=gemini; cat_flags=--yolo
@@ -1388,7 +1388,7 @@ cly_setup_profile() {  # NAME [WHY]
 
     echo "  Which flags should $name be given on every launch?"
     echo "  Enter flags, 'none' for no flags, or press Enter to keep the default."
-    echo "  (Catalog defaults skip prompts; Claude/Codex also enable remote control.)"
+    echo "  (Catalog defaults skip prompts; Claude/Codex/Antigravity also enable remote control.)"
     printf '  [%s] > ' "${dflags:-none}"
     IFS= read -r reply || { cly_no_answer; return 2; }
     flags=${reply:-$dflags}
