@@ -43,7 +43,7 @@ if [ "${BASH_VERSINFO[0]}" -lt 4 ] || { [ "${BASH_VERSINFO[0]}" = 4 ] && [ "${BA
     exit 2
 fi
 
-CLY_VERSION=4.6.0
+CLY_VERSION=4.6.1
 CLY_SOURCE=${BASH_SOURCE[0]}
 case $CLY_SOURCE in /*|[A-Za-z]:*) ;; *) CLY_SOURCE=$PWD/$CLY_SOURCE ;; esac
 
