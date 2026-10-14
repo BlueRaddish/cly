@@ -157,11 +157,13 @@ def host():
     arguments = ["resume", "--yolo", "one"] if mode == "resume" else []
     child = subprocess.Popen([shutil.which("node"), script, *arguments], stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
     try:
-        deadline = time.monotonic() + 5
+        # Shared Windows runners can take over five seconds to start Node.
+        # Readiness remains mandatory; return immediately when it arrives.
+        deadline = time.monotonic() + 20
         while not ready.exists() and time.monotonic() < deadline:
-            assert child.poll() is None, "Disposable native client exited"
+            assert child.poll() is None, "Disposable native client exited: " + str(child.returncode)
             time.sleep(0.05)
-        assert ready.exists()
+        assert ready.exists(), "Disposable native client did not become ready within 20 seconds"
         before = w.agent_console()
         records = w.active()
         assert w.agent_console() == before, "Discovery detached the caller's console"

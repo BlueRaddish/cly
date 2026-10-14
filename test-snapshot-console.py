@@ -183,7 +183,7 @@ def conpty(command, environment, directory):
         for index in (0, 3):
             api.CloseHandle(pipes[index])
             pipes[index] = None
-        assert api.WaitForSingleObject(info.hProcess, 30000) == 0, "Disposable ConPTY fixture timed out"
+        assert api.WaitForSingleObject(info.hProcess, 60000) == 0, "Disposable ConPTY fixture timed out"
         code = wintypes.DWORD()
         assert api.GetExitCodeProcess(info.hProcess, ctypes.byref(code))
         assert code.value == 0, output.decode(errors="replace")
