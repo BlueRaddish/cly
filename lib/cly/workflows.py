@@ -139,7 +139,15 @@ def bash():
     value = os.environ.get("CLY_SHELL") or shutil.which("bash")
     if not value:
         raise ValueError("Bash not found; set CLY_SHELL to your Bash 4.2+ executable")
-    return str(sessions.native_path(value))
+    shell = sessions.native_path(value)
+    if (os.name == "nt" and shell.name.lower() == "bash.exe"
+            and shell.parent.name.lower() == "bin" and shell.parent.parent.name.lower() == "usr"):
+        # Git's bin wrapper seeds the tool PATH that a fresh Windows terminal
+        # lacks; its internal usr/bin/bash.exe cannot launch CMD/BAT agents.
+        wrapper = shell.parents[2] / "bin/bash.exe"
+        if wrapper.is_file():
+            shell = wrapper
+    return str(shell)
 
 
 def cly_command(arguments):

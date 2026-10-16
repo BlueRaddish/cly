@@ -6,12 +6,15 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from unittest.mock import patch
 
 if os.name != "nt":
     print("Windows batch checks skipped on this platform")
     raise SystemExit(0)
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "lib/cly"))
+import workflows as w
 BASH = os.environ.get("CLY_SHELL", r"C:\Program Files\Git\bin\bash.exe")
 checks = 0
 
@@ -99,6 +102,53 @@ with tempfile.TemporaryDirectory(prefix="cly-batch-") as temporary:
                                         "CLY_TEST_REQUIRE_X": "yes", "CLY_TEST_FILE": posix_executable_batch})
     check(query.returncode == 0 and str(executable_batch).replace("\\", "/")[2:] in query.stdout)
     launched(["--here", "probe", *values], {"CLY_TEST_PATH": posix_folder})
+
+    # A fresh Terminal tab lacks the Git Bash PATH inherited by this suite.
+    # Exercise the public .cmd entrypoint and its actual encoded tab command,
+    # leaving CLY_SHELL unset so the default inference cannot be masked.
+    config.write_text("profile.probe.bin=" + str(batch).replace("\\", "/") + "\nprofile.probe.kind=codex\n"
+                      "profile.probe.dir=none\nprofile.probe.flags=\nprofile.probe.env=CODEX_HOME=" + str(temp / "codex") + "\n", encoding="utf-8")
+    history = temp / "codex/sessions/2026/10/16/rollout-shell.jsonl"
+    history.parent.mkdir(parents=True)
+    history.write_text(json.dumps({"type": "session_meta", "payload": {"id": "shell-resume", "cwd": str(temp),
+                               "timestamp": "2026-10-16T00:00:00Z"}}) + "\n", encoding="utf-8")
+    selected = "2026-10-16T000000Z-shell"
+    saved = temp / "state/snapshots" / (selected + ".json")
+    saved.parent.mkdir(parents=True)
+    saved.write_text(json.dumps({"schema": 1, "snapshot_id": selected, "sessions": [
+        {"profile": "probe", "kind": "codex", "directory": str(temp), "bypass": False,
+         "session_id": "shell-resume", "resume_options": {"args": [], "omitted_flags": []}}]}), encoding="utf-8")
+    clean = dict(base, CLY_PYTHON=sys.executable, CLY_NATIVE_DISCOVERY="0")
+    for name in ("CLY_SHELL", "BASH_ENV", "MSYSTEM", "MSYS2_PATH_TYPE", "CLY_WORKFLOW_QUERY"):
+        clean.pop(name, None)
+    system = Path(os.environ["SystemRoot"]) / "System32"
+    terminal = temp / "terminal"
+    terminal.mkdir()
+    (terminal / "wt.cmd").write_text("@exit /b 97\n", encoding="utf-8")
+    clean["PATH"] = os.pathsep.join(map(str, (system, system / "WindowsPowerShell/v1.0", terminal)))
+    for action in ("restore", "reload"):
+        preview = subprocess.run([str(ROOT / "bin/cly.cmd"), "snapshot", action, selected, "--dry-run"],
+                                 env=clean, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                 creationflags=subprocess.CREATE_NO_WINDOW, timeout=30)
+        check(preview.returncode == 0, preview.stderr)
+        opening = "[" if action == "restore" else "{"
+        plan = json.loads(preview.stdout[preview.stdout.index(opening):])
+        if action == "reload":
+            plan = plan["restore"]
+        with patch.dict(os.environ, clean, clear=True):
+            command = w.terminal_commands(plan, "wt")[0]
+        receipt.unlink(missing_ok=True)
+        resumed = subprocess.run(command[command.index("powershell.exe"):], env=clean, capture_output=True,
+                                 text=True, encoding="utf-8", errors="replace",
+                                 creationflags=subprocess.CREATE_NO_WINDOW, timeout=30)
+        check(resumed.returncode == 0, resumed.stdout + resumed.stderr)
+        check(receipt.exists() and json.loads(receipt.read_text()) == ["resume", "shell-resume"])
+        check("BATCH_OUT" in resumed.stdout and "BATCH_ERR" in resumed.stderr)
+    # Explicit custom shells remain authoritative, including installations
+    # without Git's sibling bin/bash.exe wrapper.
+    for shell in (str(temp / "custom/bash.exe"), str(temp / "msys/usr/bin/bash.exe")):
+        with patch.dict(os.environ, CLY_SHELL=shell):
+            check(w.bash() == shell)
 
     # Headless review jobs must retain piped prompt text through the batch bridge.
     reader.write_text("import json, os, sys\nfrom pathlib import Path\nPath(os.environ['CLY_BATCH_RECEIPT']).write_text(json.dumps(sys.stdin.read()), encoding='utf-8')\n", encoding="utf-8")

@@ -128,6 +128,12 @@ environment, rather than inheriting automation-only `NO_COLOR=1` or `TERM=dumb`
 from the snapshot command. cly's launch controls are passed explicitly. User and
 Terminal profile environment settings continue to govern color.
 
+Workflow commands use Git for Windows' `bin/bash.exe` wrapper when the selected
+shell is its internal `usr/bin/bash.exe` and the wrapper is available. This
+initializes the tool paths needed by CMD/BAT agents in fresh Windows terminals.
+Other shell paths are retained. `python test-windows-batch.py` verifies the public
+restore/reload entrypoints and their generated tab commands with a clean PATH.
+
 Only known resume options and a small set of non-secret Codex config overrides
 are saved. Unsupported flag names appear in `resume_options.omitted_flags`; their
 values are excluded and restore refuses that record instead of silently dropping
